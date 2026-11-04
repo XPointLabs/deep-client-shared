@@ -45,10 +45,6 @@ public sealed class Did2MessagingArchiveEnrollmentContractTests
     public async Task FinalReadyOrMalformedProgressRemainsAnAccountWideOrdinaryReadFence()
     {
         var (raw, scopes) = Catalog(2, 1, 1); var scope = scopes[0];
-        using var storage = new InMemoryDeepSecureStorage();
-        await storage.WriteBatchAsync([new(ProtectedDid2MessagingSessionCatalog.Slot, raw)]);
-        var catalog = new ProtectedDid2MessagingSessionCatalog(storage, scope.Network, scope.LocalAccount, scope.Instance);
-        using (var before = await catalog.ReadAsync(default)) Assert.True(before.AllIndexed);
         foreach (var progress in new[] { Progress(scope).Advance(scope, ProtectedDid2MessagingArchiveEnrollment.PhaseKind.SchemaStaged,
                 0, 0, Did2MessagingArchiveRoot.Empty(scope).PatriciaHash, Did2MessagingArchiveReducer.Empty(scope).Digest.Span)
             .Advance(scope, ProtectedDid2MessagingArchiveEnrollment.PhaseKind.Building, 0, 0,
@@ -56,6 +52,10 @@ public sealed class Did2MessagingArchiveEnrollmentContractTests
             .Advance(scope, ProtectedDid2MessagingArchiveEnrollment.PhaseKind.FinalReady, 0, 0,
                 Did2MessagingArchiveRoot.Empty(scope).PatriciaHash, Did2MessagingArchiveReducer.Empty(scope).Digest.Span).Exact.ToArray(), new byte[] { 0 } })
         {
+            using var storage = new InMemoryDeepSecureStorage();
+            await storage.WriteBatchAsync([new(ProtectedDid2MessagingSessionCatalog.Slot, raw)]);
+            var catalog = new ProtectedDid2MessagingSessionCatalog(storage, scope.Network, scope.LocalAccount, scope.Instance);
+            using (var before = await catalog.ReadAsync(default)) Assert.True(before.AllIndexed);
             await storage.WriteBatchAsync([new(ProtectedDid2MessagingArchiveEnrollment.Slot, progress)]);
             await Assert.ThrowsAsync<InvalidOperationException>(() => catalog.ReadAsync(default));
             using var retained = await storage.ReadOwnedAsync(ProtectedDid2MessagingSessionCatalog.Slot);

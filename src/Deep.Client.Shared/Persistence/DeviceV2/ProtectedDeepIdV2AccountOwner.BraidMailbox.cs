@@ -73,8 +73,16 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         }
         if (await opened.WithSqlAsync(sql => sql.HasVerifiedPeerBraidPurposeProgress(floor, frame.BraidEpoch, ct), ct).ConfigureAwait(false))
             return BraidMailboxCustody.ObsoletePurpose;
-        var context = await opened.WithSqlAsync(sql => sql.CreateVerifiedBraidTransitionContext(floor, frame.OperationId.Span, frame.CanonicalBytes.Span), ct).ConfigureAwait(false);
-        using var native = await opened.WithSqlAsync(sql => sql.ReadVerifiedLatest(floor), ct).ConfigureAwait(false);
+        // This classification cannot append a fresh control. Use the bounded
+        // authenticated read-only preview, so the fresh-append soft limit does
+        // not prevent independently verifying an obsolete captured object.
+        var preview = await opened.WithSqlAsync(sql =>
+        {
+            var state = sql.ReadFreshMaintenancePreviewState(floor, frame.OperationId.Span, out var context);
+            return (State: state, Context: context);
+        }, ct).ConfigureAwait(false);
+        var context = preview.Context;
+        using var native = preview.State;
         var proof = native.Use(bytes => ExactBraidRecoveryDurableTransactionProducer.TryVerifyObsoleteControl(
             bytes, context, scope.Network, frame.CanonicalBytes.Span));
         if (proof is null) return BraidMailboxCustody.NotCommitted;

@@ -1,101 +1,99 @@
-using System.Buffers.Binary;
 using System.Security.Cryptography;
 using Deep.Client.Shared.Persistence.DeviceV2;
+using Microsoft.Data.Sqlite;
 
 namespace Deep.Client.Shared.Persistence.DeviceV1;
 
 public sealed partial class SqliteDeviceStateStore
 {
-    internal async Task<ProtectedInitialKeyRetirementJournal.Entry> RetireCancelledInitialUnderLeaseAsync(string accountPath,
-        ReadOnlyMemory<byte> intent, HeldDeepIdV2AccountLease held, DeepIdV2AccountFileLease accountLease, CancellationToken ct)
+    // Public custody coordinates only; no restored Initial/TRS leaves a
+    // physical source segment or survives its next protected-storage callback.
+    internal sealed record CancellationSource(ulong Ordinal, byte[] RecordHash,
+        byte[] Basis, byte[] TrsHash, byte[] Session, bool Live);
+
+    internal CancellationSource? InspectCancellationSourceSegment(ReadOnlyMemory<byte> network,
+        ReadOnlyMemory<byte> checkpointExact, ProtectedInitialKeyRetirementJournal.State retirements,
+        ProtectedDid2ContactStartJournal.Entry draft)
     {
-        var op = intent.ToArray();
-        using var borrowed = held.BorrowFor(accountLease); using var operation = EnterOperation();
-        await gate.WaitAsync(ct).ConfigureAwait(false);
+        using var operation = EnterOperation(); gate.Wait();
         try
         {
-            ThrowIfDisposed(); await ReconcileInitialSessionsUnderGateAsync(ct).ConfigureAwait(false);
-            var storage = RequireInitialSessionStorage(); var network = initialSessionNetwork!;
-            var instance = await SqliteDeepIdV2AccountGeneration.ReadAccountInstanceUnderLeaseAsync(storage, network, accountId.ToArray(), ct).ConfigureAwait(false);
-            using var raw = await storage.ReadOwnedAsync(ProtectedDid2ContactStartJournal.Slot, ct).ConfigureAwait(false) ?? throw new InvalidDataException();
-            using var drafts = raw.Use(bytes => ProtectedDid2ContactStartJournal.Decode(bytes, network, accountId.Span, instance));
-            if (!drafts.Entries.TryGetValue(Convert.ToHexString(op), out var draft) || !draft.WorkStopped || draft.NativeStopMode != 2)
-                throw new CryptographicException("Source cancellation requires the actual stopped pre-session intent.");
-            var draftBinding = draft.CancellationBinding; byte[] hash = new byte[32], preclaimHash = [], rawEntry = new byte[ProtectedInitialKeyRetirementJournal.EntryBytes];
+            ThrowIfDisposed(); initialSessionNetwork = network.ToArray(); initialRetirements = retirements;
+            using var checkpoint = DeviceInitialSessionCheckpoint.Decode(checkpointExact.Span,
+                storeInstanceId.Span, accountId.Span, initialSessionNetwork);
+            if (checkpoint.Phase != 1) throw new IOException("Cancellation requires its exact stable source checkpoint.");
+            using var tx = GetConnection().BeginTransaction(deferred: true);
+            RequireInitialSourceTip(checkpoint, ReadInitialSessionTip(GetConnection(), tx));
+            return ReadCancellationSource(GetConnection(), tx, draft);
+        }
+        finally { gate.Release(); }
+    }
+
+    internal void DeleteCancellationSourceSegment(ReadOnlyMemory<byte> network,
+        ReadOnlyMemory<byte> checkpointExact, ProtectedInitialKeyRetirementJournal.State retirements,
+        ProtectedDid2ContactStartJournal.Entry draft, ProtectedInitialKeyRetirementJournal.Entry expected)
+    {
+        using var operation = EnterOperation(); gate.Wait();
+        try
+        {
+            ThrowIfDisposed(); initialSessionNetwork = network.ToArray(); initialRetirements = retirements;
+            using var checkpoint = DeviceInitialSessionCheckpoint.Decode(checkpointExact.Span,
+                storeInstanceId.Span, accountId.Span, initialSessionNetwork);
+            if (checkpoint.Phase != 1) throw new IOException("Cancellation cannot delete an unresolved source checkpoint.");
+            using var tx = GetConnection().BeginTransaction(deferred: false);
+            RequireInitialSourceTip(checkpoint, ReadInitialSessionTip(GetConnection(), tx));
+            var source = ReadCancellationSource(GetConnection(), tx, draft);
+            RequireCancellationSource(expected, draft, source);
+            if (expected.Phase != 1) throw new CryptographicException("Stable cancellation cannot destroy resurrected keys.");
+            if (source is not null)
+            {
+                using var delete = GetConnection().CreateCommand(); delete.Transaction = tx;
+                delete.CommandText = "DELETE FROM device_initial_state WHERE sequence=$sequence;";
+                delete.Parameters.AddWithValue("$sequence", checked((long)source.Ordinal));
+                if (delete.ExecuteNonQuery() != (source.Live ? 1 : 0))
+                    throw new CryptographicException("Initial cancellation deleted another key source.");
+            }
+            tx.Commit();
+        }
+        finally { gate.Release(); }
+    }
+
+    internal void RequireCancellationSource(ProtectedInitialKeyRetirementJournal.Entry expected,
+        ProtectedDid2ContactStartJournal.Entry draft, CancellationSource? source)
+    {
+        if (expected.Role != 3 || !DeviceInitialSessionCheckpoint.Fixed(expected.SourceInstance, storeInstanceId.Span) ||
+            !DeviceInitialSessionCheckpoint.Fixed(expected.Intent, draft.Intent) ||
+            !DeviceInitialSessionCheckpoint.Fixed(expected.ScopeHash, draft.CancellationBinding) ||
+            expected.Ordinal != (source?.Ordinal ?? 0) ||
+            source is not null && (!DeviceInitialSessionCheckpoint.Fixed(expected.RecordHash, source.RecordHash) ||
+                !DeviceInitialSessionCheckpoint.Fixed(expected.Basis, source.Basis) ||
+                !DeviceInitialSessionCheckpoint.Fixed(expected.TrsHash, source.TrsHash)) ||
+            expected.Phase == 2 && source?.Live == true)
+            throw new CryptographicException("Initial cancellation changed its exact source or resurrected keys.");
+    }
+
+    private CancellationSource? ReadCancellationSource(SqliteConnection db, SqliteTransaction tx,
+        ProtectedDid2ContactStartJournal.Entry draft)
+    {
+        using var source = ReadInitialSessionByIntent(db, tx, draft.Intent.ToArray());
+        if (source is null) return null;
+        if (!draft.PayloadRetired)
+        {
+            var conversation = source.RequireInitialConversation(draft.Init, draft.Hello);
             try
             {
-                using var tx = GetConnection().BeginTransaction(deferred: false);
-                using var source = ReadInitialSessionByIntent(GetConnection(), tx, op);
-                ulong ordinal = 0; var live = false;
-                if (source is not null)
-                {
-                    if (!draft.PayloadRetired)
-                    {
-                        var conversation = source.RequireInitialConversation(draft.Init, draft.Hello);
-                        try { if (!DeviceInitialSessionCheckpoint.Fixed(conversation, draft.Conversation)) throw new CryptographicException("Cancelled source changed its original events."); }
-                        finally { CryptographicOperations.ZeroMemory(conversation); }
-                    }
-                    using var read = GetConnection().CreateCommand(); read.Transaction = tx;
-                    read.CommandText = "SELECT sequence,record_hash FROM device_initial_sessions WHERE logical_intent_id=$intent;";
-                    read.Parameters.AddWithValue("$intent", op); using var row = read.ExecuteReader();
-                    if (!row.Read()) throw new CryptographicException("Cancelled initial source disappeared.");
-                    ordinal = checked((ulong)row.GetInt64(0)); hash = row.GetFieldValue<byte[]>(1);
-                    if (row.Read()) throw new CryptographicException("Cancelled source is not unique.");
-                    SHA256.HashData(source.CanonicalSpan).CopyTo(rawEntry.AsSpan(108)); source.InitialStateHashSpan.CopyTo(rawEntry.AsSpan(140));
-                    live = source.HasInitialState;
-                }
-                preclaimHash = await SqliteDeepIdV2AccountGeneration.ReadPreclaimCancellationHashUnderLeaseAsync(storage,
-                    network, accountId.ToArray(), instance, op, draftBinding, source is not null, ct).ConfigureAwait(false);
-                rawEntry[0] = 3; rawEntry[1] = 1; storeInstanceId.Span.CopyTo(rawEntry.AsSpan(4));
-                BinaryPrimitives.WriteUInt64BigEndian(rawEntry.AsSpan(36), ordinal); hash.CopyTo(rawEntry, 44);
-                draftBinding.CopyTo(rawEntry, 76); op.CopyTo(rawEntry, 172); preclaimHash.CopyTo(rawEntry, 204);
-                var candidate = new ProtectedInitialKeyRetirementJournal.Entry(rawEntry);
-                tx.Commit();
-                await SqliteDeepIdV2AccountGeneration.RequireCancellationNativeAbsenceUnderLeaseAsync(storage, accountPath,
-                    network, accountId.ToArray(), instance, candidate, held, accountLease, ct).ConfigureAwait(false);
-                var pending = await ProtectedInitialKeyRetirementJournal.StageCancellationUnderLeaseAsync(storage,
-                    network, accountId.ToArray(), instance, candidate, ct).ConfigureAwait(false);
-                if (pending.Phase == 2)
-                {
-                    if (live) throw new CryptographicException("Stable cancellation retained resurrected source keys.");
-                    await SqliteDeepIdV2AccountGeneration.CancelPreclaimUnderLeaseAsync(storage, network, accountId.ToArray(), instance, pending, ct).ConfigureAwait(false);
-                    return pending;
-                }
-#if DEEP_TEST_INTERNALS
-                InitialKeyRetirementTestHooks.Hit(InitialKeyRetirementFailpoint.AfterPending);
-#endif
-                await SqliteDeepIdV2AccountGeneration.CancelPreclaimUnderLeaseAsync(storage, network, accountId.ToArray(), instance, pending, ct).ConfigureAwait(false);
-#if DEEP_TEST_INTERNALS
-                InitialKeyRetirementTestHooks.Hit(InitialKeyRetirementFailpoint.AfterPreclaim);
-#endif
-                if (pending.Phase != 2 && ordinal != 0)
-                {
-                    await SqliteDeepIdV2AccountGeneration.RequireCancellationNativeAbsenceUnderLeaseAsync(storage, accountPath,
-                        network, accountId.ToArray(), instance, pending, held, accountLease, ct).ConfigureAwait(false);
-                    using var deletionTx = GetConnection().BeginTransaction(deferred: false);
-                    using var delete = GetConnection().CreateCommand(); delete.Transaction = deletionTx;
-                    delete.CommandText = "DELETE FROM device_initial_state WHERE sequence=$sequence;"; delete.Parameters.AddWithValue("$sequence", checked((long)ordinal));
-                    if (delete.ExecuteNonQuery() != (live ? 1 : 0)) throw new CryptographicException("Initial cancellation deleted another key source.");
-                    ct.ThrowIfCancellationRequested(); held.RequireOwner(accountLease); deletionTx.Commit();
-                }
-#if DEEP_TEST_INTERNALS
-                InitialKeyRetirementTestHooks.Hit(InitialKeyRetirementFailpoint.AfterSourceDelete);
-#endif
-                await ReconcileInitialSessionsUnderGateAsync(ct).ConfigureAwait(false);
-                using (var readBackTx = GetConnection().BeginTransaction(deferred: false))
-                using (var retired = ReadInitialSessionByIntent(GetConnection(), readBackTx, op))
-                    if (retired?.HasInitialState == true) throw new CryptographicException("Cancelled source keys survived deletion.");
-                await SqliteDeepIdV2AccountGeneration.RequireCancellationNativeAbsenceUnderLeaseAsync(storage, accountPath,
-                    network, accountId.ToArray(), instance, pending, held, accountLease, ct).ConfigureAwait(false);
-                await ProtectedInitialKeyRetirementJournal.CompleteCancellationUnderLeaseAsync(storage, network,
-                    accountId.ToArray(), instance, pending, ct).ConfigureAwait(false);
-#if DEEP_TEST_INTERNALS
-                InitialKeyRetirementTestHooks.Hit(InitialKeyRetirementFailpoint.AfterStable);
-#endif
-                return pending.Stable();
+                if (!DeviceInitialSessionCheckpoint.Fixed(conversation, draft.Conversation))
+                    throw new CryptographicException("Cancelled source changed its original events.");
             }
-            finally { foreach (var bytes in new[] { draftBinding, hash, preclaimHash, rawEntry }) CryptographicOperations.ZeroMemory(bytes); }
+            finally { CryptographicOperations.ZeroMemory(conversation); }
         }
-        finally { gate.Release(); CryptographicOperations.ZeroMemory(op); }
+        using var read = db.CreateCommand(); read.Transaction = tx;
+        read.CommandText = "SELECT sequence,record_hash FROM device_initial_sessions WHERE logical_intent_id=$intent;";
+        read.Parameters.AddWithValue("$intent", draft.Intent.ToArray()); using var row = read.ExecuteReader();
+        if (!row.Read()) throw new CryptographicException("Cancelled Initial source disappeared.");
+        var result = new CancellationSource(checked((ulong)row.GetInt64(0)), row.GetFieldValue<byte[]>(1),
+            SHA256.HashData(source.CanonicalSpan), source.InitialStateHashSpan.ToArray(), source.SessionId.ToArray(), source.HasInitialState);
+        if (row.Read()) throw new CryptographicException("Cancelled Initial source is not unique.");
+        return result;
     }
 }

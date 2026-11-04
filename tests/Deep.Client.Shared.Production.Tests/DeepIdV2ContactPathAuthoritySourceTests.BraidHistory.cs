@@ -102,6 +102,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                 Assert.Equal(new ulong[] { 2, 1, 2 }, epochs); // Original MAC link0 really no longer exists.
                 return Task.CompletedTask;
             });
+            var archiveBefore = await fixture.ReadNativeArchive(alice);
             await fixture.CompactSenderPrefix(alice, checked((int)floor.Ordinal), default);
             fixture.ColdReopenCompactionStorage();
             using (var current = await fixture.ReadSenderCompactionCurrent()) Assert.NotNull(current);
@@ -111,38 +112,71 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             Assert.Equal(floor.Exact.ToArray(), (await fixture.ReadMessagingFloor(alice)).Exact.ToArray());
             var changed = original.ToArray(); changed[^1] ^= 1;
             await Assert.ThrowsAsync<CryptographicException>(() => fixture.ReceiveOwnedBraid(alice, changed));
-            await fixture.WithSenderHistoryStorage(alice, async (reference, secure, observer, held) =>
+            var originalChanged = false;
+            try
             {
-                var root = await Did2MessagingHistoryCheckpoint.ReadRegisteredAsync(secure, alice, default);
-                var empty = Did2MessagingHistoryCheckpoint.RegisteredEmpty(alice);
-                Assert.True(await secure.CompareExchangeAsync(Did2MessagingHistoryCheckpoint.Slot(alice), root.Exact, empty.Exact));
-                try { Assert.Throws<CryptographicException>(() => new Did2MessagingSqlJournal(observer, alice, empty).VerifyTip()); }
-                finally { Assert.True(await secure.CompareExchangeAsync(Did2MessagingHistoryCheckpoint.Slot(alice), empty.Exact, root.Exact)); }
-                using (var corrupt = observer.CreateCommand())
+                await fixture.WithSenderHistoryStorage(alice, async (reference, secure, observer, held) =>
                 {
-                    corrupt.CommandText = "UPDATE events SET envelope=$changed WHERE operation=$op;";
-                    corrupt.Parameters.AddWithValue("$changed", changed); corrupt.Parameters.AddWithValue("$op", Bytes(32, 201));
-                    Assert.Equal(1, corrupt.ExecuteNonQuery());
-                }
-                try
-                {
-                    Assert.Throws<CryptographicException>(() => reference.VerifyTip());
+                    var root = await Did2MessagingHistoryCheckpoint.ReadRegisteredAsync(secure, alice, default);
+                    var actualArchive = await Did2MessagingArchiveRoot.ReadRegisteredAsync(secure, alice, default);
+                    archiveBefore.RequireSource(root); actualArchive.RequireSource(root);
+                    Assert.True(actualArchive.Basis.Ordinal > archiveBefore.Basis.Ordinal);
+                    Assert.True(await secure.CompareExchangeAsync(Did2MessagingArchiveRoot.Slot(alice), actualArchive.Exact, archiveBefore.Exact));
+                    try
+                    {
+                        Assert.Throws<CryptographicException>(() =>
+                        {
+                            var rollback = new Did2MessagingSqlJournal(observer, alice, root); rollback.BindArchiveRoot(archiveBefore);
+                            rollback.VerifyTip();
+                        });
+                    }
+                    finally { Assert.True(await secure.CompareExchangeAsync(Did2MessagingArchiveRoot.Slot(alice), archiveBefore.Exact, actualArchive.Exact)); }
+                    Assert.Equal(floor.Exact.ToArray(), reference.VerifyTip().Exact.ToArray());
+                    using (var corrupt = observer.CreateCommand())
+                    {
+                        corrupt.CommandText = "UPDATE events SET envelope=$changed WHERE operation=$op;";
+                        corrupt.Parameters.AddWithValue("$changed", changed); corrupt.Parameters.AddWithValue("$op", Bytes(32, 201));
+                        Assert.Equal(1, corrupt.ExecuteNonQuery()); originalChanged = true;
+                    }
+                    // Bounded tip verification does not rehash unrelated
+                    // archived payloads. Selecting this exact Braid original does.
+                    Assert.Equal(floor.Exact.ToArray(), reference.VerifyTip().Exact.ToArray());
                     Assert.Throws<CryptographicException>(() => reference.ReadVerifiedBraidControl(floor, Bytes(32, 201)));
-                }
-                finally
+                    held.RequireActive();
+                });
+                fixture.DropNativeRuntimes();
+                await Assert.ThrowsAsync<CryptographicException>(async () =>
                 {
-                    using var restore = observer.CreateCommand();
-                    restore.CommandText = "UPDATE events SET envelope=$original WHERE operation=$op;";
-                    restore.Parameters.AddWithValue("$original", original); restore.Parameters.AddWithValue("$op", Bytes(32, 201));
-                    Assert.Equal(1, restore.ExecuteNonQuery());
-                }
-                held.RequireActive(); Assert.Equal(floor.Exact.ToArray(), reference.VerifyTip().Exact.ToArray());
-            });
+                    using var rejected = await fixture.CreateOwnedText(alice, "corrupt archived Braid must fail cold full audit");
+                });
+                Assert.Equal(floor.Exact.ToArray(), (await fixture.ReadMessagingFloor(alice)).Exact.ToArray());
+            }
+            finally
+            {
+                if (originalChanged)
+                    await fixture.RestoreCompactedBraidOriginal(alice, Bytes(32, 201), original, changed);
+                fixture.DropNativeRuntimes();
+            }
             using (var replay = await fixture.ReceiveOwnedBraid(alice, original))
                 Assert.Equal(original, replay.ExactControl.ToArray());
             Assert.Equal(floor.Exact.ToArray(), (await fixture.ReadMessagingFloor(alice)).Exact.ToArray());
         }
         finally { CryptographicOperations.ZeroMemory(original); }
+    }
+
+    private sealed partial class Fixture
+    {
+        internal async Task RestoreCompactedBraidOriginal(Did2MessagingSessionScope scope, byte[] operation, byte[] original, byte[] changed)
+        {
+            using var writer = await ArchiveFixtureWriter(scope);
+            writer.Execute(connection =>
+            {
+                using var restore = connection.CreateCommand();
+                restore.CommandText = "UPDATE events SET envelope=$original WHERE operation=$op AND envelope=$changed;";
+                restore.Parameters.AddWithValue("$original", original); restore.Parameters.AddWithValue("$op", operation);
+                restore.Parameters.AddWithValue("$changed", changed); Assert.Equal(1, restore.ExecuteNonQuery());
+            });
+        }
     }
 
     private static async Task SendBraidHistoryText(Fixture fixture, Did2MessagingSessionScope sender,

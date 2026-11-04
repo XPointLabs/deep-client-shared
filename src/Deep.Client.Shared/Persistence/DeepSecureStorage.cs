@@ -279,11 +279,29 @@ public interface IDeepSecureStorage
     Task PurgeStoreV2NamespaceAsync(CancellationToken cancellationToken = default);
 }
 
-public sealed class InMemoryDeepSecureStorage : IDeepSecureStorage, IDisposable
+public sealed class InMemoryDeepSecureStorage : IDeepSecureStorage, IDeepSecureStorageGuardedRead, IDisposable
 {
     private readonly ConcurrentDictionary<string, byte[]> values = new(StringComparer.Ordinal);
     private readonly object gate = new();
     private int disposed;
+
+    Task<OwnedDeepSecretBatch> IDeepSecureStorageGuardedRead.ReadOwnedGuardedBatchAsync(
+        DeepSecureStorageGuardedRead request, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        lock (gate)
+        {
+            ThrowIfDisposed(); cancellationToken.ThrowIfCancellationRequested();
+            foreach (var slot in request.Guards.Keys)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                request.Require(slot, values.GetValueOrDefault(slot));
+            }
+            var result = OwnedDeepSecretBatch.CopyFrom(request.ReturnedSlots, values);
+            try { cancellationToken.ThrowIfCancellationRequested(); return Task.FromResult(result); }
+            catch { result.Dispose(); throw; }
+        }
+    }
 
     public Task<bool> CompareAndDeleteAsync(string guardSlot, ReadOnlyMemory<byte> expected,
         IReadOnlyList<string> slots, CancellationToken cancellationToken = default)

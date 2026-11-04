@@ -34,7 +34,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         using (var command = await fixture.CreateOwnedRouteUpdate(sender))
         using (var sent = await fixture.SendOwnedRouteUpdate(sender, command.OperationId))
         using (var received = await fixture.ReceiveOwnedMessage(receiver, sent.ExactEnvelope.ToArray()))
-            Assert.Equal(1, received.RouteProcessing[0]);
+            Assert.Equal(3, received.RouteProcessing[0]);
         fixture.ColdReopenReceiverStoreStorage();
         const string newText = "qualified successor route";
         var newOperation = await fixture.QueueNativeText(receiver, newText);
@@ -132,7 +132,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         using (var command = await fixture.CreateOwnedRouteUpdate(sender))
         using (var sent = await fixture.SendOwnedRouteUpdate(sender, command.OperationId.ToArray()))
         using (var received = await fixture.ReceiveOwnedMessage(receiver, sent.ExactEnvelope.ToArray()))
-            Assert.Equal(1, received.RouteProcessing[0]);
+            Assert.Equal(3, received.RouteProcessing[0]);
         await fixture.CompactHistoricalPeerRoutePrefix(receiver);
         fixture.ColdReopenReceiverStoreStorage();
         var native = (await fixture.ReadMessagingFloor(receiver)).Exact.ToArray();
@@ -236,7 +236,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         using (var update = await fixture.CreateOwnedRouteUpdate(sender))
         using (var sent = await fixture.SendOwnedRouteUpdate(sender, update.OperationId.ToArray()))
         using (var received = await fixture.ReceiveOwnedMessage(receiver, sent.ExactEnvelope.ToArray()))
-            Assert.Equal(1, received.RouteProcessing[0]);
+            Assert.Equal(3, received.RouteProcessing[0]);
         await fixture.CompactHistoricalPeerRoutePrefix(receiver);
         fixture.ColdReopenReceiverStoreStorage();
         var native = (await fixture.ReadMessagingFloor(receiver)).Exact.ToArray();

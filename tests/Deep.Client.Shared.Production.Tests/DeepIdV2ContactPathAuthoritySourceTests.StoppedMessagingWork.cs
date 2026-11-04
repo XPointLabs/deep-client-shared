@@ -96,17 +96,17 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         Assert.Equal(sql.After, await fixture.ReadCompleteOrdinaryApplicationProjection(sender));
         // Cancellation is not recall: the exact already-authored control can
         // independently authenticate at the peer, without sender re-dispatch.
-        using (var received = await fixture.ReceiveOwnedMessage(receiver, first)) Assert.Equal(1, received.RouteProcessing[0]);
+        using (var received = await fixture.ReceiveOwnedMessage(receiver, first)) Assert.Equal(3, received.RouteProcessing[0]);
         await fixture.RenewNativeSenderPublicationPastExpiryAsync(renewedRouteLifetimeSeconds: 1000, proactive: true);
         using (var command = await fixture.CreateOwnedRouteUpdate(sender))
         {
             var successor = command.OperationId.ToArray();
-            var control = Assert.IsType<Deep.Protocol.ApplicationCore.ContactRouteUpdateDmc2Payload>(
+            var control = Assert.IsType<Deep.Protocol.ContactV2.ContactRouteHistoryDmc2Payload>(
                 Deep.Protocol.ApplicationCore.ApplicationCoreCodec.DecodeDmc2(command.ExactDmc2.Span).ParsedPayload);
-            Assert.Equal(2UL, control.RouteGeneration);
+            Assert.Equal(2UL, BinaryPrimitives.ReadUInt64BigEndian(control.RightCursor.Span));
             using var sent = await fixture.SendOwnedRouteUpdate(sender, successor);
             using var received = await fixture.ReceiveOwnedMessage(receiver, sent.ExactEnvelope.ToArray());
-            Assert.Equal(1, received.RouteProcessing[0]);
+            Assert.Equal(3, received.RouteProcessing[0]);
         }
         foreach (var value in new[] { first, before }) CryptographicOperations.ZeroMemory(value);
     }

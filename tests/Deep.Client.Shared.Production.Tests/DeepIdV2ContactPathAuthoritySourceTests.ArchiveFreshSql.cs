@@ -195,9 +195,21 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                     }, default);
                 });
                 Assert.True(hit, "The actual protected provider callback did not run.");
-                Assert.NotNull(second); Assert.NotSame(first, second); Assert.Equal(ConnectionState.Closed, second!.State);
                 Assert.True(error is SqliteException or CryptographicException or InvalidDataException,
                     "A physically changed selected encrypted page was released from a prior successful read: " + (error?.GetType().Name ?? "none"));
+                // Fresh native provenance is checked before entering the
+                // consumer. It may reject the damaged page before second is
+                // assigned; no failed-open connection may survive either way.
+                if (second is not null)
+                { Assert.NotSame(first, second); Assert.Equal(ConnectionState.Closed, second.State); }
+                var persistedPage = new byte[pageSize];
+                try
+                {
+                    using var exclusive = new FileStream(path, FileMode.Open, FileAccess.ReadWrite, FileShare.None);
+                    exclusive.Position = offset; exclusive.ReadExactly(persistedPage);
+                    Assert.True(persistedPage.AsSpan().SequenceEqual(damaged), "Rejected read repaired or replaced the physically damaged page.");
+                }
+                finally { CryptographicOperations.ZeroMemory(persistedPage); }
                 var stable = await ReadMessagingFloor(scope);
                 Assert.True(stable.Exact.Span.SequenceEqual(floor.Exact.Span), "Rejected selected archive read advanced native state.");
             }
@@ -208,7 +220,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             }
             void WritePage(byte[] value)
             {
-                using var file = new FileStream(path, FileMode.Open, FileAccess.Write, FileShare.ReadWrite);
+                using var file = new FileStream(path, FileMode.Open, FileAccess.Write, FileShare.None);
                 file.Position = offset; file.Write(value); file.Flush(true);
             }
         }

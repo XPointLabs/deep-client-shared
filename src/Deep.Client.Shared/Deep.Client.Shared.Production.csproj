@@ -47,10 +47,12 @@
     <Compile Include="Persistence\XPointNetworkV1\**\*.cs" />
     <Compile Include="Persistence\DeepAccountStoreContracts.cs" />
     <Compile Include="Persistence\DeepSecureStorage.cs" />
+    <Compile Include="Persistence\DeepSecureStorageGuardedRead.cs" />
     <Compile Include="Persistence\OwnedByteExports.cs" />
     <Compile Include="Persistence\DeepSecureStorageRegistration.cs" />
     <Compile Include="Persistence\InMemoryDeepAccountStore.cs" />
     <Compile Include="Persistence\JournaledDeepSecureStorage.cs" />
+    <Compile Include="Persistence\JournaledDeepSecureStorage.GuardedRead.cs" />
     <Compile Include="Persistence\JournaledDeepSecureStorage.Manifest.cs" />
     <Compile Include="Persistence\JournaledDeepSecureStorage.Objects.cs" />
     <Compile Include="Persistence\JournaledDeepSecureStorage.Enrollment.cs" />

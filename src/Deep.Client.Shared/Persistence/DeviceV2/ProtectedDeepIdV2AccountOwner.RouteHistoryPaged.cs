@@ -130,10 +130,11 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         using (var actual = await ReadRouteHistorySourcesUnderLeaseAsync(opened, subject,
             Did2RouteHistorySelection.Initial(), held, ct).ConfigureAwait(false))
             if (actual.Snapshot.PreviousDecision is not null) return;
+        var legacyRoot = subject == 1 ? await RequireRetainedLegacyRouteDraftsDrainedUnderLeaseAsync(current, opened, held, ct).ConfigureAwait(false) : null;
         await MaintainNativePrefixUnderLeaseAsync(current, opened.Scope, held, ct).ConfigureAwait(false);
         using var qualified = await QualifiedDid2RouteHistoryDecision.CaptureUnderLeaseAsync(this, current, opened,
             subject, Did2RouteHistorySelection.Initial(), Did2RouteHistoryDecision.ActionKind.Bootstrap,
-            own, peer, source, held, ct).ConfigureAwait(false);
+            own, peer, source, held, ct, legacyRoot).ConfigureAwait(false);
         _ = await opened.Custody.CommitRouteHistoryDecisionAsync(qualified, ct).ConfigureAwait(false);
     }
 
@@ -481,7 +482,17 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                     await RecheckStagedRouteHistoryUnderLeaseAsync(current, opened, read, own, peer, source, held, first, ct).ConfigureAwait(false);
                     throw new RouteHistoryCannotAdvanceException();
                 }
-                RequireMonotonicHistoryLive(read, result, equalityRequired: false); live = selected;
+                RequireMonotonicHistoryLive(read, result, equalityRequired: false);
+                // Replaying an older authored announcement cannot replace a
+                // newer L for this exact independently qualified endpoint.
+                if (!snapshot.L.IsAbsent && FixedRoute(result.ExactCompletedRoute.Span, RetainedHistoryLiveClosure(read).ExactBytes.Span) &&
+                    ApplicationCoreCodec.DecodeDmc2(read.Original(selected).Span).SenderClientSequence <=
+                    ApplicationCoreCodec.DecodeDmc2(read.Original(snapshot.L).Span).SenderClientSequence)
+                {
+                    await RecheckStagedRouteHistoryUnderLeaseAsync(current, opened, read, own, peer, source, held, first, ct).ConfigureAwait(false);
+                    throw new RouteHistoryCannotAdvanceException();
+                }
+                live = selected;
             }
             else if (action == Did2RouteHistoryDecision.ActionKind.Conflict)
             {
@@ -758,12 +769,16 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             byte subject, Did2RouteHistorySelection selection, Did2RouteHistoryDecision.ActionKind action,
             DeepIdV2ContactPathAuthoritySource.OwnPreKeyAuthoringAuthority own,
             VerifiedDeepIdV2DirectoryFreshness peer, DeepIdV2ContactPathAuthoritySource source,
-            HeldDeepIdV2AccountLease held, CancellationToken ct)
+            HeldDeepIdV2AccountLease held, CancellationToken ct, byte[]? expectedLegacyRoot = null)
         {
             var read = await owner.ReadRouteHistorySourcesUnderLeaseAsync(opened, subject, selection, held, ct).ConfigureAwait(false);
             byte[] body = [];
             try
             {
+                if (expectedLegacyRoot is not null && (action != Did2RouteHistoryDecision.ActionKind.Bootstrap || subject != 1 ||
+                    !read.Authored.Roots.TryGetValue(ProtectedDid2DirectTextJournal.Slot, out var actualLegacyRoot) ||
+                    actualLegacyRoot is null || !FixedRoute(expectedLegacyRoot, actualLegacyRoot)))
+                    throw new CryptographicException("Retained legacy route work changed before own history bootstrap.");
                 if (action != Did2RouteHistoryDecision.ActionKind.Bootstrap)
                 {
                     var enriched = SelectAdoptedHistoryFacts(read);

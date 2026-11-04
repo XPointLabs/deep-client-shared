@@ -296,10 +296,13 @@ public sealed partial class DeviceInitialSessionCustodyTests
         internal async Task<byte[]> ReadCheckpoint() { using var value = await Storage.ReadOwnedAsync(DeviceInitialSessionCheckpoint.Slot); return value!.Use(bytes => bytes.ToArray()); }
         public void Dispose() { CryptographicOperations.ZeroMemory(key); Directory.Delete(directory, recursive: true); }
     }
-    private sealed class FaultStorage : IDeepSecureStorage
+    private sealed class FaultStorage : IDeepSecureStorage, IDeepSecureStorageGuardedRead
     {
         public Task<OwnedDeepSecretBatch> ReadOwnedBatchAsync(IReadOnlyList<string> slots,
             CancellationToken ct = default) => inner.ReadOwnedBatchAsync(slots, ct);
+        Task<OwnedDeepSecretBatch> IDeepSecureStorageGuardedRead.ReadOwnedGuardedBatchAsync(
+            DeepSecureStorageGuardedRead request, CancellationToken ct) =>
+            inner.ReadOwnedGuardedBatchAsync(request.ReturnedSlots, request.Guards, ct);
         public Task<bool> CompareAndDeleteAsync(string guardSlot, ReadOnlyMemory<byte> expected,
             IReadOnlyList<string> slots, CancellationToken ct = default) => inner.CompareAndDeleteAsync(guardSlot, expected, slots, ct);
 

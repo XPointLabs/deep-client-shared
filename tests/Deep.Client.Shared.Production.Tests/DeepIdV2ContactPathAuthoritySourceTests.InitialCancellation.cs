@@ -375,10 +375,19 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                 var deleted = keys.FindCancellation(intent) ?? throw new InvalidDataException(); Assert.Equal(2, deleted.Phase); keys.RequirePreclaimState(claims);
                 var heldLease = new DeepIdV2AccountFileLease(Path.Combine(directory, "deep-store-v2-account.lock"));
                 using var held = await heldLease.AcquireAsync(default);
-                using var source = await SqliteDeepIdV2AccountGeneration.OpenExistingCancellationSourceUnderLeaseAsync(storage,
-                    Path.Combine(directory, "deep-store-v2-account.dsv2"), Network, account, instance, held, heldLease, default);
-                if (await source.HasCompletedInitialSessionAsync(intent, default))
-                    using (var metadata = await source.ReadMessagingSourceByIntentUnderLeaseAsync(intent, default)) Assert.False(metadata.HasInitialState);
+                var source = await SqliteDeepIdV2AccountGeneration.ReadCancellationSourceUnderLeaseAsync(storage,
+                    Path.Combine(directory, "deep-store-v2-account.dsv2"), Network, account, instance, intent, held, heldLease, default);
+                Assert.Equal(deleted.SourceInstance.ToArray(), source.SourceInstance);
+                Assert.Equal(deleted.ScopeHash.ToArray(), source.DraftBinding);
+                Assert.Equal(deleted.Ordinal, source.Source?.Ordinal ?? 0);
+                if (deleted.Ordinal == 0) Assert.Null(source.Source);
+                else
+                {
+                    Assert.NotNull(source.Source); Assert.False(source.Source.Live);
+                    Assert.Equal(deleted.RecordHash.ToArray(), source.Source.RecordHash);
+                    Assert.Equal(deleted.Basis.ToArray(), source.Source.Basis);
+                    Assert.Equal(deleted.TrsHash.ToArray(), source.Source.TrsHash);
+                }
                 using var application = await SqliteDeepIdV2AccountGeneration.OpenExistingApplicationForOwnerUnderLeaseAsync(storage,
                     Path.Combine(directory, "deep-store-v2-account.dsv2"), Network, account, instance, held, heldLease, default);
                 using var ordinaryRaw = await storage.ReadOwnedAsync(ProtectedDid2DirectTextJournal.Slot) ?? throw new InvalidDataException();

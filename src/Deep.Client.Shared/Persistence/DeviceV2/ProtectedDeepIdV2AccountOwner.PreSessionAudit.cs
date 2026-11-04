@@ -50,9 +50,8 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             throw new CryptographicException("Pre-session payload cleanup cannot precede its exact completed key destruction.");
         await SqliteDeepIdV2AccountGeneration.RequireCancellationNativeAbsenceUnderLeaseAsync(storage, sqlStatePath,
             networkId, account, instance, cancellation, held, lease, ct).ConfigureAwait(false);
-        using var source = await SqliteDeepIdV2AccountGeneration.OpenExistingCancellationSourceUnderLeaseAsync(storage,
-            sqlStatePath, networkId, account, instance, held, lease, ct).ConfigureAwait(false);
-        await source.RetireCancelledInitialUnderLeaseAsync(sqlStatePath, draft.Intent.ToArray(), held, lease, ct).ConfigureAwait(false);
+        await SqliteDeepIdV2AccountGeneration.RetireCancelledInitialUnderLeaseAsync(storage,
+            sqlStatePath, networkId, account, instance, draft.Intent.ToArray(), held, lease, ct).ConfigureAwait(false);
         ct.ThrowIfCancellationRequested(); held.RequireOwner(lease);
     }
 

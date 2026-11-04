@@ -193,17 +193,15 @@ internal static partial class SqliteDeepIdV2AccountGeneration
                 if (!scope.IsInitiator) await CaptureReceiverSourceCustodyAsync(storage, observation, ct).ConfigureAwait(false);
                 if (observation.CheckpointPhase == 1) return observation;
                 if (attempt != 0) throw new CryptographicException("Initial source remained pending after exact source recovery.");
-                var readSlots = observation.Roots.Keys.Order(StringComparer.Ordinal).ToArray();
+                string[] readSlots = [KeySlot, observation.CheckpointSlot];
                 byte[] registration = [], pending = [], stable = [];
                 IReadOnlyList<SqlitePreKeyV2InventoryStore.SourceConsumption> consumption;
                 try
                 {
-                    using (var actual = await storage.ReadOwnedBatchAsync(readSlots, ct).ConfigureAwait(false))
+                    using (var actual = await storage.ReadOwnedGuardedBatchAsync(readSlots, observation.Roots, ct).ConfigureAwait(false))
                     {
-                        observation.RequireRoots(Enumerable.Range(0, readSlots.Length).ToDictionary(index => readSlots[index],
-                            index => actual[index]?.Use(bytes => SHA256.HashData(bytes)), StringComparer.Ordinal));
-                        registration = (actual[Array.IndexOf(readSlots, KeySlot)] ?? throw new InvalidDataException("Source recovery lost its registration.")).Use(bytes => bytes.ToArray());
-                        observation.Checkpoint = (actual[Array.IndexOf(readSlots, observation.CheckpointSlot)] ??
+                        registration = (actual[0] ?? throw new InvalidDataException("Source recovery lost its registration.")).Use(bytes => bytes.ToArray());
+                        observation.Checkpoint = (actual[1] ??
                             throw new InvalidDataException("Source recovery lost its exact pending checkpoint.")).Use(bytes => bytes.ToArray());
                         actual.Dispose();
                         ct.ThrowIfCancellationRequested();

@@ -33,7 +33,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
     public async Task Did2InitialSourceSegments_ReceiverPendingConsumptionCompletesAfterCancellationOrLostStableCas(bool lostStableResult)
     {
         await using var fixture = await Fixture.CreateAsync(withPeer: true, encryptedStorage: true);
-        var (_, receiver) = await fixture.PrepareActiveNativePair();
+        var (_, receiver) = await fixture.PrepareActiveNativePair(oneTimeIndex: 0);
         await fixture.CheckReceiverPendingSourceCompletion(receiver, lostStableResult);
     }
 
@@ -199,17 +199,20 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             _ = await StageAndRecordPairAsync(owner: peer);
             var fresh = await source.VerifyForOwnPreKeyAuthoringAsync(peer, default);
             var old = DeepIdV2PreKeyServiceCodec.Decode(initial.ExactXps1.Span);
+            var prior = DeepIdV2PreKeyPublicationCodec.Decode(initial.ExactXpp1.Span);
             using (var author = await peer.OpenLocalPreKeyAuthoringAuthorityAsync())
             {
                 var context = new Dpk2AuthoringContext(ApplicationCoreVerifier.StartDmd1Lineage(local.Directory).Next,
-                    2, 1, 1, fresh.Proof.TrustedLowerUnixSeconds, fresh.Proof.TrustedLowerUnixSeconds,
-                    BinaryPrimitives.ReadUInt64BigEndian(old.Field(11).Span) + 60);
-                var service = author.AuthorPreKeyServiceV2(context, local.Binding, 32, 1, old.CanonicalBytes.Span);
+                    BinaryPrimitives.ReadUInt64BigEndian(old.Field(5).Span),
+                    checked(BinaryPrimitives.ReadUInt64BigEndian(prior.Manifest.Field(7).Span) + 1), 1,
+                    fresh.Proof.TrustedLowerUnixSeconds, fresh.Proof.TrustedLowerUnixSeconds,
+                    BinaryPrimitives.ReadUInt64BigEndian(old.Field(11).Span));
+                var service = author.RestorePreKeyServiceV2(context, local.Binding, old.CanonicalBytes.Span);
                 var placement = ContactServicePlacementFactory.Create(fresh.Network, ContactServiceRequestKind.PublishPreKeyInventory, service.ServiceCapability);
                 var drs = new byte[38]; "DRS1"u8.CopyTo(drs); BinaryPrimitives.WriteUInt16BigEndian(drs.AsSpan(4), 1);
                 local.Binding.Identity.Revocations.Snapshot.CanonicalHash.Span.CopyTo(drs.AsSpan(6));
-                using var inventory = author.AuthorInventoryV2(context, local.Binding, service, drs, new byte[32],
-                    Bytes(32, 0xd7), placement.PlacementHash.Span, 32, 1);
+                using var inventory = author.AuthorInventoryV2(context, local.Binding, service, drs, prior.Manifest.ExactHash.Span,
+                    Bytes(32, 0xd7), placement.PlacementHash.Span, 32, BinaryPrimitives.ReadUInt16BigEndian(old.Field(9).Span));
                 await peer.StageOwnSuccessorPreKeyInventoryAsync(service, inventory);
             }
             _ = await StageAndRecordPairAsync(owner: peer);
@@ -218,14 +221,16 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             var slot = ProtectedPreKeyInventoryChain.EntrySlot(publicationHash);
             var (complete, _, _, _, _) = await PrepareNativeHelloCompletion(Bytes(32, 0xd8), oneTimeIndex: 0);
             using var sent = await complete(accounts); var envelope = sent.ExactDph2.ToArray();
-            using (ResponderInitialSessionTestHooks.Push(point =>
-                { if (point == ResponderInitialSessionFailpoint.AfterPending) throw new IOException("Pending receiver source before native admission."); }))
-                await Assert.ThrowsAsync<IOException>(() => CompleteReceiver(envelope));
             var folder = Path.Combine(directory, "peer"); var accountPath = Path.Combine(folder, "deep-store-v2-account.dsv2");
             var protectedStorage = new NetworkMarkerFaultStorage(NativeStorage(receiver));
             var ownerLease = new DeepIdV2AccountFileLease(Path.Combine(folder, "deep-store-v2-account.lock"));
             var owner = new ProtectedDeepIdV2AccountOwner(protectedStorage, ownerLease, accountPath, Network, 1);
+            // Current-account reads recover pending receiver custody. Establish
+            // this actual account binding before creating the pending cut.
             using var current = await owner.ReadCurrentAsync(1_000, pq, default) ?? throw new InvalidDataException();
+            using (ResponderInitialSessionTestHooks.Push(point =>
+                { if (point == ResponderInitialSessionFailpoint.AfterPending) throw new IOException("Pending receiver source before native admission."); }))
+                await Assert.ThrowsAsync<IOException>(() => CompleteReceiver(envelope));
             var nativeBefore = await ReadMessagingFloor(receiver);
             using var cancellation = new CancellationTokenSource(); var consumed = false; var stableCommitted = false; var actualPendingRead = false;
             protectedStorage.AfterSourceRecoveryReadGroup = phase =>
@@ -253,7 +258,10 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                     using var opened = await SqliteDeepIdV2AccountGeneration.OpenMessagingArchiveAuditUnderLeaseAsync(
                         protectedStorage, accountPath, current, receiver, cancellation.Token);
                 });
-                Assert.True(actualPendingRead); Assert.True(consumed); Assert.True(stableCommitted);
+                var diagnostic = failure?.GetType().Name + ": " + failure?.Message;
+                Assert.True(actualPendingRead, "Actual phase2 recovery inventory was not observed: " + diagnostic);
+                Assert.True(consumed, "Actual protected successor consumption was not observed: " + diagnostic);
+                Assert.True(stableCommitted, "Actual stable source CAS was not observed: " + diagnostic);
                 Assert.True(lostStableResult ? failure is IOException : failure is OperationCanceledException);
             }
             await AssertConsumed();

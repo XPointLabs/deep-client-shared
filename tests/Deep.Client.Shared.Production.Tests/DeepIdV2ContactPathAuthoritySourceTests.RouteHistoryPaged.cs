@@ -153,28 +153,26 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
     {
         await using var fixture = await Fixture.CreateAsync(withPeer: true, encryptedStorage: true, longMailboxWindow: true);
         var (sender, receiver) = await PrepareRouteFaultPair(fixture);
-        await fixture.RenewNativeSenderPublicationPastExpiryAsync(renewedRouteLifetimeSeconds: 1_000,
-            successorAdvertisementLifetimeSeconds: 2_000);
-        byte[] first, final; byte[] finalRouteHash;
-        using (var command = await fixture.CreateOwnedRouteUpdate(sender))
-        using (var sent = await fixture.SendOwnedRouteUpdate(sender, command.OperationId)) first = sent.ExactEnvelope.ToArray();
-        await fixture.RenewNativeSenderPublicationPastExpiryAsync(renewedRouteLifetimeSeconds: 1_000, proactive: true);
-        using (var command = await fixture.CreateOwnedRouteUpdate(sender))
-        {
-            var page = Assert.IsType<ContactRouteHistoryDmc2Payload>(ApplicationCoreCodec.DecodeDmc2(command.ExactDmc2.Span).ParsedPayload);
-            finalRouteHash = SHA256.HashData(page.Atoms.Last(atom => atom.IsCompleted).ExactCompletedRoute.Span);
-            using var sent = await fixture.SendOwnedRouteUpdate(sender, command.OperationId); final = sent.ExactEnvelope.ToArray();
-        }
-        using (var received = await fixture.ReceivePagedOwnerOnly(receiver, final)) Assert.Equal(3, received.RouteProcessing[0]);
+        using var controls = await fixture.PrepareFreshPagedHistoryGap(sender);
+        using (var received = await fixture.ReceivePagedOwnerOnly(receiver, controls.Final)) Assert.Equal(3, received.RouteProcessing[0]);
         var staged = await fixture.ReadMessagingFloor(receiver);
-        using (var received = await fixture.ReceivePagedOwnerOnly(receiver, first)) Assert.Equal(3, received.RouteProcessing[0]);
+        Assert.DoesNotContain(await fixture.ReadPagedNativeDecisionRows(receiver),
+            row => row.Body.Action == Did2RouteHistoryDecision.ActionKind.Promotion);
+        foreach (var prefix in controls.Prefixes)
+            using (var received = await fixture.ReceivePagedOwnerOnly(receiver, prefix)) Assert.Equal(3, received.RouteProcessing[0]);
         var preceding = await fixture.ReadMessagingFloor(receiver);
         Assert.True(preceding.Ordinal > staged.Ordinal);
+        Assert.True(fixture.CurrentProofTime * 1_000 < controls.FinalExpiry,
+            "Continuation must qualify the retained final announcement while it is actually current.");
         Assert.True(await fixture.ContinuePagedHistory(receiver));
         var decisions = await fixture.ReadPagedNativeDecisionRows(receiver);
         Assert.Equal(Did2RouteHistoryDecision.ActionKind.Promotion, decisions[^1].Body.Action);
         var promoted = decisions[^1].Body.L;
-        Assert.True(promoted.Ordinal < decisions.Where(row => row.Body.Action == Did2RouteHistoryDecision.ActionKind.Promotion).First().Body.L.Ordinal);
+        var finalOperation = Deep.Protocol.MessagingWire.Dpe2Codec.Decode(controls.Final).OperationId;
+        Assert.True(CryptographicOperations.FixedTimeEquals(promoted.Operation, finalOperation.Span),
+            "Continuation promoted another original instead of the final page already received before its prefix.");
+        Assert.True(promoted.Ordinal < await fixture.ReadGapPrefixEventOrdinal(receiver, controls.Prefixes[^1]),
+            "The retained final original must precede the later delivered prefix in actual native receive order.");
         var stable = await fixture.ReadMessagingFloor(receiver);
         Assert.Equal(preceding.RatchetGeneration, stable.RatchetGeneration);
         Assert.False(await fixture.ContinuePagedHistory(receiver));
@@ -183,11 +181,140 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         fixture.DropNativeRuntimes(); fixture.ColdReopenReceiverStoreStorage();
         Assert.False(await fixture.ContinuePagedHistory(receiver));
         Assert.Equal(stable.Exact.ToArray(), (await fixture.ReadMessagingFloor(receiver)).Exact.ToArray());
-        Assert.Equal(finalRouteHash, (await fixture.ReadPagedNativeDecisionRows(receiver))[^1].Body.EndpointHash.ToArray());
+        Assert.Equal(controls.FinalRouteHash, (await fixture.ReadPagedNativeDecisionRows(receiver))[^1].Body.EndpointHash.ToArray());
+    }
+
+    private sealed class FreshPagedHistoryGapControls(
+        IReadOnlyList<byte[]> prefixes, byte[] final, byte[] finalRouteHash, ulong finalExpiry) : IDisposable
+    {
+        internal IReadOnlyList<byte[]> Prefixes { get; } = prefixes;
+        internal byte[] Final { get; } = final;
+        internal byte[] FinalRouteHash { get; } = finalRouteHash;
+        internal ulong FinalExpiry { get; } = finalExpiry;
+        public void Dispose()
+        {
+            foreach (var prefix in Prefixes) CryptographicOperations.ZeroMemory(prefix);
+            CryptographicOperations.ZeroMemory(Final); CryptographicOperations.ZeroMemory(FinalRouteHash);
+        }
     }
 
     private sealed partial class Fixture
     {
+        internal async Task<FreshPagedHistoryGapControls> PrepareFreshPagedHistoryGap(Did2MessagingSessionScope sender)
+        {
+            // Four real publication generations exceed the codec's maximum
+            // three atoms without inventing a fixed two-page payload shape.
+            // Complete clock-advancing public work BEFORE minting controls.
+            for (var generation = 1; generation <= 4; generation++)
+                await RenewNativeSenderPublicationPastExpiryAsync(renewedRouteLifetimeSeconds: 300,
+                    successorAdvertisementLifetimeSeconds: 500, proactive: generation != 1);
+            var prefixes = new List<byte[]>(); byte[]? previousCursor = null;
+            try
+            {
+                for (var pageNumber = 0; pageNumber < 8; pageNumber++)
+                {
+                    using var command = await CreateOwnedRouteUpdate(sender);
+                    var message = ApplicationCoreCodec.DecodeDmc2(command.ExactDmc2.Span);
+                    var page = Assert.IsType<ContactRouteHistoryDmc2Payload>(message.ParsedPayload);
+                    Assert.InRange(page.Atoms.Count, 1, DeepIdV2ContactRouteHistoryCodec.MaximumAtoms);
+                    if (previousCursor is not null) Assert.Equal(previousCursor, page.LeftCursor.ToArray());
+                    var leftC = BinaryPrimitives.ReadUInt64BigEndian(page.LeftCursor.Span);
+                    var leftP = BinaryPrimitives.ReadUInt64BigEndian(page.LeftCursor.Span[40..]);
+                    var rightC = BinaryPrimitives.ReadUInt64BigEndian(page.RightCursor.Span);
+                    var rightP = BinaryPrimitives.ReadUInt64BigEndian(page.RightCursor.Span[40..]);
+                    Assert.True(rightC > leftC || rightP > leftP, "The genuine bounded page did not traverse its original public history.");
+                    Assert.True(rightC >= leftC && rightP >= leftP);
+                    previousCursor = page.RightCursor.ToArray();
+                    using var sent = await SendOwnedRouteUpdate(sender, command.OperationId);
+                    var envelope = sent.ExactEnvelope.ToArray();
+                    if (page.Mode == DeepIdV2ContactRouteHistoryMode.EvidenceAndAnnouncement)
+                    {
+                        Assert.NotEmpty(prefixes);
+                        Assert.Equal(4UL, rightC);
+                        Assert.True(CurrentProofTime * 1_000 < message.ExpiresAtUnixMilliseconds,
+                            "The real final announcement expired during its own native send.");
+                        return new(prefixes, envelope, SHA256.HashData(page.Atoms.Last(atom => atom.IsCompleted).ExactCompletedRoute.Span),
+                            message.ExpiresAtUnixMilliseconds);
+                    }
+                    Assert.Equal(DeepIdV2ContactRouteHistoryMode.Evidence, page.Mode);
+                    prefixes.Add(envelope);
+                }
+                throw new InvalidDataException("The four-generation genuine history did not finish within its fixed page bound.");
+            }
+            catch { foreach (var prefix in prefixes) CryptographicOperations.ZeroMemory(prefix); throw; }
+        }
+
+        internal async Task RequireActualGapRequestAlreadyCommitted(Did2MessagingSessionScope scope,
+            Did2MessagingFloor before, Did2MessagingFloor gap, byte[] finalEnvelope, byte[] finalEventHash)
+        {
+            byte[] requestOperation = [], requestEventHash = [], relationship = [], anchor = [];
+            try
+            {
+                await WithRouteReadSql(scope, (sql, connection) =>
+                {
+                    using (var received = sql.ReadVerifiedOperation(gap, Deep.Protocol.MessagingWire.Dpe2Codec.Decode(finalEnvelope).OperationId.Span))
+                    {
+                        Assert.NotNull(received); Assert.Equal(2, received!.Direction);
+                        Assert.True(received.Ordinal > before.Ordinal);
+                        Assert.True(received.ExactEnvelope.SequenceEqual(finalEnvelope));
+                        Assert.True(received.EventHash.SequenceEqual(finalEventHash));
+                        using var exact = received.OwnAuthenticatedDmc2();
+                        exact.Use(bytes =>
+                        {
+                            var control = Assert.IsType<ContactRouteHistoryDmc2Payload>(ApplicationCoreCodec.DecodeDmc2(bytes).ParsedPayload);
+                            relationship = control.RelationshipId.ToArray(); anchor = control.OriginalAnchorHash.ToArray();
+                        });
+                    }
+                    var outgoingCount = 0;
+                    foreach (var outgoing in sql.ReadVerifiedOutgoingEvents(gap, default))
+                        using (outgoing)
+                        {
+                            if (outgoing.Ordinal <= before.Ordinal) continue;
+                            outgoingCount++;
+                            requestOperation = Deep.Protocol.MessagingWire.Dpe2Codec.Decode(outgoing.ExactEnvelope).OperationId.ToArray();
+                            requestEventHash = outgoing.EventHash.ToArray();
+                        }
+                    Assert.Equal(1, outgoingCount);
+                });
+                // The native request exists before this existing-request retry;
+                // a newly minted operation cannot satisfy both comparisons.
+                using (var request = await PrepareOwnedHistory(scope))
+                {
+                    Assert.NotNull(request);
+                    Assert.True(CryptographicOperations.FixedTimeEquals(request!.OperationId.Span, requestOperation));
+                    Assert.True(CryptographicOperations.FixedTimeEquals(SHA256.HashData(request.ExactDmc2.Span), requestEventHash));
+                    var control = Assert.IsType<ContactRouteHistoryDmc2Payload>(ApplicationCoreCodec.DecodeDmc2(request.ExactDmc2.Span).ParsedPayload);
+                    Assert.Equal(DeepIdV2ContactRouteHistoryMode.HistoryRequest, control.Mode);
+                    Assert.True(control.RequestEventHash.Span.IndexOfAnyExcept((byte)0) < 0);
+                    Assert.True(control.RelationshipId.Span.SequenceEqual(relationship));
+                    Assert.True(control.OriginalAnchorHash.Span.SequenceEqual(anchor));
+                    Assert.True(control.LeftCursor.Span.SequenceEqual(control.RightCursor.Span));
+                }
+                Assert.Equal(gap.Exact.ToArray(), (await ReadMessagingFloor(scope)).Exact.ToArray());
+            }
+            finally
+            {
+                foreach (var bytes in new[] { requestOperation, requestEventHash, relationship, anchor })
+                    CryptographicOperations.ZeroMemory(bytes);
+            }
+        }
+
+        internal async Task<ulong> ReadGapPrefixEventOrdinal(Did2MessagingSessionScope scope, byte[] envelope)
+        {
+            var operation = Deep.Protocol.MessagingWire.Dpe2Codec.Decode(envelope).OperationId;
+            ulong ordinal = 0;
+            await WithRouteReadSql(scope, (sql, connection) =>
+            {
+                _ = sql.VerifyTip();
+                using var query = connection.CreateCommand();
+                query.CommandText = "SELECT ordinal FROM events WHERE operation=$operation;";
+                query.Parameters.AddWithValue("$operation", operation.ToArray());
+                ordinal = checked((ulong)Convert.ToInt64(query.ExecuteScalar()));
+                Assert.True(ordinal > 0);
+            });
+            return ordinal;
+        }
+
         internal async Task<bool> ContinuePagedHistory(Did2MessagingSessionScope scope)
         {
             var account = scope.IsInitiator ? ReopenAccount() : ReopenGrantReader();

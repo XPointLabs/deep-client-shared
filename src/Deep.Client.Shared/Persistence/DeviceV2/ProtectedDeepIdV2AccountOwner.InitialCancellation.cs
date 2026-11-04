@@ -58,20 +58,15 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             // An absent device source may be provisioned only before stop under
             // independently current account ownership. Existing missing state
             // is never repaired; local recovery thereafter only reopens it.
-            using var sourceStore = await SqliteDeepIdV2AccountGeneration.OpenCurrentDeviceStateStoreAsync(storage, sqlStatePath, current, ct).ConfigureAwait(false);
-            using var completed = await sourceStore.HasCompletedInitialSessionAsync(op, ct).ConfigureAwait(false)
-                ? await sourceStore.ReadMessagingSourceByIntentUnderLeaseAsync(op, ct).ConfigureAwait(false) : null;
+            await SqliteDeepIdV2AccountGeneration.EnsureCancellationSourceUnderLeaseAsync(storage, sqlStatePath, current, op, held, lease, ct).ConfigureAwait(false);
+            var completed = (await SqliteDeepIdV2AccountGeneration.ReadCancellationSourceUnderLeaseAsync(storage, sqlStatePath,
+                networkId, current.AccountId, instance, op, held, lease, ct,
+                expectedGeneration: current.Verified.PublicEvidence.Binding.Identity.Account.Certificate.AccountGeneration).ConfigureAwait(false)).Source;
             using var catalog = await new ProtectedDid2MessagingSessionCatalog(storage, networkId, current.AccountId.Span, instance).ReadAsync(ct).ConfigureAwait(false);
             Did2MessagingSessionScope? selected = null;
             if (completed is not null)
             {
-                if (!draft.PayloadRetired)
-                {
-                    var conversation = completed.RequireInitialConversation(draft.Init, draft.Hello);
-                    try { if (!FixedRoute(conversation, draft.Conversation)) throw new CryptographicException("Initial cancellation selected another completed source."); }
-                    finally { CryptographicOperations.ZeroMemory(conversation); }
-                }
-                selected = catalog.FindSource(completed.SessionId.Span, SHA256.HashData(completed.CanonicalSpan));
+                selected = catalog.FindSource(completed.Session, completed.Basis);
             }
             for (var index = 0; index < catalog.Count; index++)
             {
@@ -80,6 +75,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                     FixedRoute(scope.RemoteAccount, draft.Exact.Slice(64, 32)) && (selected is null || !FixedRoute(selected.Exact, scope.Exact)))
                     throw new CryptographicException("Initial cancellation has foreign or lost source/catalog custody.");
             }
+            catalog.Dispose();
             if (selected is not null)
             {
                 using var opened = await SqliteDeepIdV2AccountGeneration.OpenInitialTransferMessagingUnderLeaseAsync(storage, sqlStatePath,
@@ -88,7 +84,6 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 if (floor.Ordinal != 0)
                 {
                     if (draft.WorkStopped && draft.NativeStopMode != 1) throw new CryptographicException("Pre-session stopped intent acquired native work.");
-                    completed?.Dispose();
                     await CompleteMessagingTransferUnderLeaseAsync(current, opened, held, ct).ConfigureAwait(false);
                     if (!await TryStopControlWorkUnderLeaseAsync(current, held, opened, selected, InitialMailboxOperation(op), reason,
                         verifier, own, source, ct).ConfigureAwait(false)) throw new CryptographicException("Committed native Initial lost its exact draft.");
@@ -137,8 +132,8 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 Did2MailboxSendTestHooks.Hit(Did2MailboxSendFailpoint.AfterWorkStopRoot);
 #endif
             }
-            completed?.Dispose();
-            await sourceStore.RetireCancelledInitialUnderLeaseAsync(sqlStatePath, op, held, lease, ct).ConfigureAwait(false);
+            await SqliteDeepIdV2AccountGeneration.RetireCancelledInitialUnderLeaseAsync(storage, sqlStatePath,
+                networkId, current.AccountId, instance, op, held, lease, ct).ConfigureAwait(false);
             await MaintainPreSessionControlUnderLeaseAsync(current, held, op, instance, own, source, ct).ConfigureAwait(false);
             return true;
         }
@@ -165,9 +160,8 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         foreach (var draft in drafts.Entries.Values.Where(entry => entry.WorkStopped && entry.NativeStopMode == 2))
         {
             if (retirements.FindCancellation(draft.Intent)?.Phase == 2) continue;
-            using var store = await SqliteDeepIdV2AccountGeneration.OpenExistingCancellationSourceUnderLeaseAsync(storage,
-                sqlStatePath, networkId, account, instance, held, lease, ct).ConfigureAwait(false);
-            await store.RetireCancelledInitialUnderLeaseAsync(sqlStatePath, draft.Intent.ToArray(), held, lease, ct).ConfigureAwait(false);
+            await SqliteDeepIdV2AccountGeneration.RetireCancelledInitialUnderLeaseAsync(storage,
+                sqlStatePath, networkId, account, instance, draft.Intent.ToArray(), held, lease, ct).ConfigureAwait(false);
         }
     }
 }

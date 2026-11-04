@@ -1,3 +1,4 @@
+using System.Buffers.Binary;
 using System.Security.Cryptography;
 using Deep.Client.Shared.Persistence.DeviceV2;
 using Deep.Client.Shared.Persistence.MessagingV1;
@@ -81,10 +82,18 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         Assert.Empty(await fixture.ListOwnedReceiptObligations(receiver));
         if (expiredBeforeReceive)
         {
+            Assert.Equal(1, decisions[^1].Body.L.Kind); // Still the actual original Hello endpoint.
+            var originalRoute = Assert.IsType<ContactHelloDmc2Payload>(hello.ParsedPayload).MailboxRoute.Route;
+            var originalExpiry = new[] { (originalRoute.Authorization, 13), (originalRoute.Route, 18),
+                (originalRoute.Successor, 11), (originalRoute.Selection, 9), (originalRoute.Reachability, 17) }
+                .Min(value => BinaryPrimitives.ReadUInt64BigEndian(value.Item1.Field(value.Item2).Span));
+            Assert.True(fixture.CurrentProofTime > originalExpiry, "The original live endpoint must actually be expired before testing delivery denial.");
             var blockedGrants = new OwnedGrantTransport(fixture, ownerOnPrimary: false);
             var blockedTransport = new RejectInitialDispatchFactory();
-            var error = await Assert.ThrowsAsync<CryptographicException>(() => fixture.QueueNativeText(receiver,
-                "expired history cannot authorize current delivery"));
+            const string text = "expired history cannot authorize current delivery";
+            var queued = await fixture.QueueNativeText(receiver, text);
+            var error = await Assert.ThrowsAsync<CryptographicException>(() => fixture.SendNativeText(receiver,
+                queued, text, blockedGrants, blockedTransport));
             Assert.DoesNotContain("Retained authenticated route fault", error.Message, StringComparison.Ordinal);
             Assert.Equal(0, blockedGrants.Calls); Assert.Equal(0, blockedTransport.Calls);
         }
@@ -199,12 +208,17 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             var secure = scope.IsInitiator ? (Deep.Client.Shared.Persistence.IDeepSecureStorage)storage : peerStorage;
             var lease = new DeepIdV2AccountFileLease(Path.Combine(stateDirectory, "deep-store-v2-account.lock"));
             using var held = await lease.AcquireAsync(default);
-            using var catalog = await new ProtectedDid2MessagingSessionCatalog(secure, Network, scope.LocalAccount, scope.Instance).ReadAsync(default);
+            using var roots = await secure.ReadOwnedBatchAsync([ProtectedDid2MessagingSessionCatalog.Slot,
+                Did2MessagingHistoryCheckpoint.Slot(scope), Did2MessagingArchiveRoot.Slot(scope), ProtectedDid2MessagingArchiveEnrollment.Slot]);
+            Assert.Null(roots[3]);
+            using var catalog = (roots[0] ?? throw new InvalidDataException()).Use(bytes =>
+                ProtectedDid2MessagingSessionCatalog.Decode(bytes, Network, scope.LocalAccount, scope.Instance));
+            var history = (roots[1] ?? throw new InvalidDataException("Actual protected history absent.")).Use(bytes => Did2MessagingHistoryCheckpoint.Decode(bytes, scope));
+            var archive = (roots[2] ?? throw new InvalidDataException("Actual protected archive absent.")).Use(bytes => Did2MessagingArchiveRoot.Decode(bytes, scope));
+            archive.RequireSource(history); roots.Dispose();
             using var connection = SqliteDeepIdV2AccountGeneration.OpenExistingMessagingForCompactionUnderLease(
                 Path.Combine(stateDirectory, "deep-store-v2-account.dsv2"), catalog, scope, held, lease);
-            using var rawHistory = await secure.ReadOwnedAsync(Did2MessagingHistoryCheckpoint.Slot(scope)) ?? throw new InvalidDataException("Actual protected history absent.");
-            var history = rawHistory.Use(bytes => Did2MessagingHistoryCheckpoint.Decode(bytes, scope));
-            var sql = new Did2MessagingSqlJournal(connection, scope, history);
+            var sql = new Did2MessagingSqlJournal(connection, scope, history); sql.BindArchiveRoot(archive);
             using var native = sql.ReadVerifiedOperation(floor, operation) ?? throw new InvalidDataException("Actual native control absent.");
             return native.RouteProcessing.ToArray();
         }

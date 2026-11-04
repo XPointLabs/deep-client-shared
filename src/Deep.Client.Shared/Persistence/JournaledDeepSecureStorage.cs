@@ -13,7 +13,7 @@ public interface IDeepSecretProtector
 
 /// <summary>One protected complete inventory and immutable authenticated value
 /// objects. The constructor opens existing state; creation/enrollment are explicit.</summary>
-public sealed partial class JournaledDeepSecureStorage : IDeepSecureStorage, IDisposable
+public sealed partial class JournaledDeepSecureStorage : IDeepSecureStorage, IDeepSecureStorageGuardedRead, IDisposable
 {
     private const int MaximumEntries = DeepSecureStorageRegistration.MaximumEntries;
     private const int MaximumSlotBytes = 512;

@@ -23,6 +23,10 @@ public sealed class Did2MessagingSqlJournalTests
         var directory = Path.Combine(Path.GetTempPath(), "did2-msg-sql-" + Guid.NewGuid().ToString("N")); Directory.CreateDirectory(directory);
         var path = Path.Combine(directory, "session.dms2"); var key = RandomNumberGenerator.GetBytes(32);
         var scope = Scope(); var floor = Did2MessagingFloor.Empty(scope);
+        // Independent component-fixture baseline, retained before any SQL
+        // corruption. It grants no account/runtime admission authority.
+        var archive = Did2MessagingArchiveRoot.Empty(scope);
+        archive.RequireSource(Did2MessagingHistoryCheckpoint.RegisteredEmpty(scope));
         try
         {
             using (var connection = SqliteDeepIdV2AccountGeneration.OpenMessagingConnectionForTests(path, key, true))
@@ -45,13 +49,20 @@ public sealed class Did2MessagingSqlJournalTests
                 await storage.WriteBatchAsync([new(scope.FloorSlot + ".pending.0", new byte[] { 1 })]);
                 // Component-only empty-session custody uses actual fresh keyed
                 // segments. It does not supply account/runtime admission.
-                using var segments = new OwnedDid2MessagingStorage(scope, checkpoint, token =>
+                using var segments = new OwnedDid2MessagingStorage(scope, checkpoint, async token =>
                 {
                     token.ThrowIfCancellationRequested();
+                    var actualFloor = await checkpoint.ReadAsync(token);
                     var fresh = SqliteDeepIdV2AccountGeneration.OpenMessagingConnectionForTests(path, key, false);
-                    var backend = new Did2MessagingSqlJournal(fresh, scope, Did2MessagingHistoryCheckpoint.RegisteredEmpty(scope));
-                    backend.BindArchiveRoot(Did2MessagingArchiveRoot.Empty(scope));
-                    return Task.FromResult(new Did2MessagingSqlSegment(fresh, backend));
+                    try
+                    {
+                        var backend = new Did2MessagingSqlJournal(fresh, scope, Did2MessagingHistoryCheckpoint.RegisteredEmpty(scope));
+                        backend.BindArchiveRoot(archive);
+                        Assert.Equal(actualFloor.Exact.ToArray(), backend.VerifyTip().Exact.ToArray());
+                        backend.BindOpenedFloor(actualFloor);
+                        return new Did2MessagingSqlSegment(fresh, backend);
+                    }
+                    catch { fresh.Dispose(); throw; }
                 });
                 var owner = segments.Custody;
                 Assert.Equal(floor.Exact.ToArray(), (await owner.ReconcileAsync(default)).Exact.ToArray());
@@ -72,7 +83,9 @@ public sealed class Did2MessagingSqlJournalTests
             if (defect == "none")
             {
                 using var connection = SqliteDeepIdV2AccountGeneration.OpenMessagingConnectionForTests(path, key, false);
-                Assert.Equal(floor.Exact.ToArray(), new Did2MessagingSqlJournal(connection, scope, Did2MessagingHistoryCheckpoint.RegisteredEmpty(scope)).VerifyTip().Exact.ToArray());
+                var reopened = new Did2MessagingSqlJournal(connection, scope, Did2MessagingHistoryCheckpoint.RegisteredEmpty(scope));
+                reopened.BindArchiveRoot(archive);
+                Assert.Equal(floor.Exact.ToArray(), reopened.VerifyTip().Exact.ToArray());
             }
             Assert.False(File.ReadAllBytes(path).AsSpan(0, 16).SequenceEqual("SQLite format 3\0"u8));
         }
@@ -93,10 +106,16 @@ public sealed class Did2MessagingSqlJournalTests
         try
         {
             var scope = Scope(); var floor = Did2MessagingFloor.Empty(scope);
+            var archive = Did2MessagingArchiveRoot.Empty(scope);
+            archive.RequireSource(Did2MessagingHistoryCheckpoint.RegisteredEmpty(scope));
             using (var connection = SqliteDeepIdV2AccountGeneration.OpenMessagingConnectionForTests(rawPath, key, true))
                 new Did2MessagingSqlJournal(connection, scope, Did2MessagingHistoryCheckpoint.RegisteredEmpty(scope)).CreateRegisteredEmpty(floor);
             using (var reopened = SqliteDeepIdV2AccountGeneration.OpenMessagingConnectionForTests(rawPath, key, false))
-                Assert.Equal(floor.Exact.ToArray(), new Did2MessagingSqlJournal(reopened, scope, Did2MessagingHistoryCheckpoint.RegisteredEmpty(scope)).VerifyTip().Exact.ToArray());
+            {
+                var sql = new Did2MessagingSqlJournal(reopened, scope, Did2MessagingHistoryCheckpoint.RegisteredEmpty(scope));
+                sql.BindArchiveRoot(archive);
+                Assert.Equal(floor.Exact.ToArray(), sql.VerifyTip().Exact.ToArray());
+            }
             Assert.False(File.ReadAllBytes(rawPath).AsSpan(0, 16).SequenceEqual("SQLite format 3\0"u8));
             Assert.Equal((2, 1, "delete"), SqliteDeepIdV2AccountGeneration.ReadConnectionPolicyForTests(rawPath, key, false));
             Assert.ThrowsAny<Exception>(() =>

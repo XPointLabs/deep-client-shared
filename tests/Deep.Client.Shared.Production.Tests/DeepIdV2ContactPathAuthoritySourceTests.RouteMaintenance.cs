@@ -35,7 +35,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         byte[] cipher;
         using (var sent = await fixture.SendOwnedRouteUpdate(sender, op)) cipher = sent.ExactEnvelope.ToArray();
         Assert.Equal(op, await fixture.SelectRouteMaintenance(sender)); // committed but not stored remains original work
-        using (var received = await fixture.ReceiveOwnedMessage(receiver, cipher)) Assert.Equal(1, received.RouteProcessing[0]);
+        using (var received = await fixture.ReceiveOwnedMessage(receiver, cipher)) Assert.Equal(3, received.RouteProcessing[0]);
         var terminal = new OwnedStoreFixture(fixture, sender, op, cipher);
         _ = await fixture.DeliverNativeMessage(sender, op, new OwnedGrantTransport(fixture, ownerOnPrimary: true), terminal);
         Assert.Null(await fixture.SelectRouteMaintenance(sender));

@@ -217,10 +217,8 @@ internal static partial class SqliteDeepIdV2AccountGeneration
         var retirementIndex = -1;
         if (provenancePurpose == NativeProvenancePurpose.Established)
         { retirementIndex = slots.Count; slots.Add(ProtectedInitialKeyRetirementJournal.Slot); }
-        if (source is not null)
-            foreach (var slot in source.Roots.Keys.Order(StringComparer.Ordinal))
-                if (!slots.Contains(slot, StringComparer.Ordinal)) slots.Add(slot);
-        using var inventory = await storage.ReadOwnedBatchAsync(slots, ct).ConfigureAwait(false);
+        using var inventory = source is null ? await storage.ReadOwnedBatchAsync(slots, ct).ConfigureAwait(false) :
+            await storage.ReadOwnedGuardedBatchAsync(slots, source.Roots, ct).ConfigureAwait(false);
         ct.ThrowIfCancellationRequested();
         var registration = inventory[0] ?? throw new InvalidDataException("The DID2 SQL key record is absent.");
         var instance = registration.Use(bytes => ReadAccountInstanceFromRegistration(bytes, network.Span, account.Span));
@@ -334,8 +332,6 @@ internal static partial class SqliteDeepIdV2AccountGeneration
                 pairedApplication = (inventory[7] ?? throw new InvalidDataException("Final paired admission lost application registration.")).Use(bytes => bytes.ToArray());
                 for (var i = 8; i < authoredEnd; i++) pairedRoots.Add(slots[i], inventory[i]?.Use(bytes => SHA256.HashData(bytes)));
             }
-            if (source is not null)
-                source.RequireRoots(Enumerable.Range(0, slots.Count).ToDictionary(i => slots[i], i => inventory[i]?.Use(bytes => SHA256.HashData(bytes)), StringComparer.Ordinal));
             inventory.Dispose(); // In particular no raw Group/root/key loan crosses the application read.
             source?.Verify(pairedRegistration, floor.Status != 0);
             source?.Dispose();

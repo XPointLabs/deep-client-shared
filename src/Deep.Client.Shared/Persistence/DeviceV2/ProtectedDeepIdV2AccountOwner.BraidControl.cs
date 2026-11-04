@@ -32,6 +32,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         var exact = receivedControl.ToArray();
         var op = send ? operation.ToArray() : Dbr2Codec.Decode(exact).OperationId.ToArray();
         OwnedDid2BraidControlPersistedEvent? result = null;
+        OwnedDid2MessagingStorage? maintainedStorage = null;
         try
         {
             if (!send)
@@ -47,13 +48,23 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             using var account = await RequireCurrentUnderLeaseAsync(trustedUnixSeconds, verifier, ct).ConfigureAwait(false);
             var first = await RequireMessagingFreshnessAsync(account, own, peer, source, held, ct).ConfigureAwait(false);
             OwnedInitialMessagingSeed.RequireFreshScope(scope, own.Proof, peer, first);
-            using var opened = await OpenNativeMessagingUnderLeaseAsync(account, scope, held, ct).ConfigureAwait(false);
+            using var firstOpened = await OpenNativeMessagingUnderLeaseAsync(account, scope, held, ct).ConfigureAwait(false);
+            var opened = firstOpened;
             var floor = await opened.Custody.ReconcileAsync(ct).ConfigureAwait(false);
+            var freshNative = true;
             if (send)
             {
                 result = await opened.WithSqlAsync(sql => sql.ReadVerifiedBraidControl(floor, op), ct).ConfigureAwait(false);
+                freshNative = result is null;
                 if (result is not null && result.Direction != 3)
                     throw new CryptographicException("Braid send operation belongs to another direction.");
+            }
+            else
+            {
+                using var retained = await opened.WithSqlAsync(sql => sql.ReadVerifiedBraidControl(floor, op), ct).ConfigureAwait(false);
+                freshNative = retained is null;
+                if (retained is not null && (retained.Direction != 4 || !FixedRoute(retained.ExactControl, exact)))
+                    throw new CryptographicException("Braid receive differs from its exact original direction/frame.");
             }
             if (result is null)
             {
@@ -65,6 +76,16 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                     await RequireNewMailboxWorkCapacityUnderLeaseAsync(account, held, opened, scope, op,
                         own, peer, source, verifier, ct).ConfigureAwait(false);
                     floor = await opened.Custody.ReconcileAsync(ct).ConfigureAwait(false);
+                }
+                if (freshNative)
+                {
+                    maintainedStorage = await PrepareNativeMaintenanceForBraidAsync(account, scope, opened, floor,
+                        held, op, exact, send, own, peer, source, first, ct).ConfigureAwait(false);
+                    if (maintainedStorage is not null)
+                    {
+                        opened = maintainedStorage;
+                        floor = await opened.Custody.ReconcileAsync(ct).ConfigureAwait(false);
+                    }
                 }
                 var context = await opened.WithSqlAsync(sql => sql.CreateVerifiedBraidTransitionContext(floor, op, exact), ct).ConfigureAwait(false);
                 using var prior = await opened.WithSqlAsync(sql => sql.ReadVerifiedLatest(floor), ct).ConfigureAwait(false);
@@ -116,7 +137,40 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             ct.ThrowIfCancellationRequested(); held.RequireActive();
             var value = result; result = null; return value;
         }
-        finally { result?.Dispose(); CryptographicOperations.ZeroMemory(exact); CryptographicOperations.ZeroMemory(op); }
+        finally { maintainedStorage?.Dispose(); result?.Dispose(); CryptographicOperations.ZeroMemory(exact); CryptographicOperations.ZeroMemory(op); }
+    }
+
+    private async Task<OwnedDid2MessagingStorage?> PrepareNativeMaintenanceForBraidAsync(
+        VerifiedDeepIdV2CurrentAccount current, Did2MessagingSessionScope scope, OwnedDid2MessagingStorage opened,
+        Did2MessagingFloor floor, HeldDeepIdV2AccountLease held, byte[] operation, byte[] exact, bool send,
+        DeepIdV2ContactPathAuthoritySource.OwnPreKeyAuthoringAuthority own, VerifiedDeepIdV2DirectoryFreshness peer,
+        DeepIdV2ContactPathAuthoritySource source, Deep.Protocol.DeepExtension.PrivacyRouting.OnionMonotonicReading first,
+        CancellationToken ct)
+    {
+        if (opened.RecoveredLocalCompaction || string.Equals(recoveredNativePrefixScope, Convert.ToHexString(scope.Hash), StringComparison.Ordinal))
+        {
+            recoveredNativePrefixScope = null;
+            return null;
+        }
+        var archive = await Did2MessagingArchiveRoot.ReadRegisteredAsync(storage, scope, ct).ConfigureAwait(false);
+        if (floor.Ordinal < archive.Basis.Ordinal) throw new CryptographicException("Braid maintenance hint rolled back its native floor.");
+        if (floor.Phase != 1 || floor.Status != 1 || floor.Ordinal - archive.Basis.Ordinal < NativeWorkingSoftLimit) return null;
+        // Authenticate the fresh control before maintenance. This preparation
+        // never commits and all preview state/outputs die before a provider.
+        var preview = await opened.WithSqlAsync(sql =>
+        {
+            var state = sql.ReadFreshMaintenancePreviewState(floor, operation, out var context);
+            return (State: state, Context: context);
+        }, ct).ConfigureAwait(false);
+        using (var state = preview.State)
+        using (var prepared = state.Use(bytes => send
+            ? ExactBraidRecoveryDurableTransactionProducer.PrepareSend(bytes, preview.Context, scope.Network, operation)
+            : ExactBraidRecoveryDurableTransactionProducer.PrepareReceive(bytes, preview.Context, scope.Network, exact))) { }
+        opened.Dispose();
+        await MaintainNativePrefixUnderLeaseAsync(current, scope, held, ct).ConfigureAwait(false);
+        recoveredNativePrefixScope = null;
+        await RequireFinalMessagingFreshnessAsync(current, scope, own, peer, source, held, first, ct).ConfigureAwait(false);
+        return await OpenNativeMessagingUnderLeaseAsync(current, scope, held, ct).ConfigureAwait(false);
     }
 
     private sealed class AccountBraidControlAuthority(

@@ -14,7 +14,7 @@ namespace Deep.Client.Shared.Persistence.DeviceV2;
 internal sealed partial class ProtectedDeepIdV2AccountOwner
 {
     private enum OwnedRouteHistoryCommand { Announcement, Request, Response }
-    private sealed class RouteHistoryWorkNotRequiredException : Exception { }
+    private sealed class RouteHistoryWorkNotRequiredException(string? message = null) : InvalidOperationException(message) { }
     private sealed class RouteHistoryRequestUnmatchedException : Exception { }
 
     internal async Task<DirectTextOutboxEntry?> PrepareRouteHistoryCommandAsync(ulong seconds, IDeepMlDsa65Verifier verifier,

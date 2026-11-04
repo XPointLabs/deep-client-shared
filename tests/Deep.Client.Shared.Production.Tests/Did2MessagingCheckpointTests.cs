@@ -200,10 +200,13 @@ public sealed partial class Did2MessagingCheckpointTests
         { using var part = await storage.ReadOwnedAsync(scope.FloorSlot + ".pending." + index); Assert.Null(part); }
     }
 
-    private sealed class LostResponseStorage(IDeepSecureStorage inner) : IDeepSecureStorage
+    private sealed class LostResponseStorage(IDeepSecureStorage inner) : IDeepSecureStorage, IDeepSecureStorageGuardedRead
     {
         public Task<OwnedDeepSecretBatch> ReadOwnedBatchAsync(IReadOnlyList<string> slots,
             CancellationToken ct = default) => inner.ReadOwnedBatchAsync(slots, ct);
+        Task<OwnedDeepSecretBatch> IDeepSecureStorageGuardedRead.ReadOwnedGuardedBatchAsync(
+            DeepSecureStorageGuardedRead request, CancellationToken ct) =>
+            inner.ReadOwnedGuardedBatchAsync(request.ReturnedSlots, request.Guards, ct);
         public async Task<bool> CompareAndDeleteAsync(string guardSlot, ReadOnlyMemory<byte> expected, IReadOnlyList<string> slots, CancellationToken ct = default)
         { var result = await inner.CompareAndDeleteAsync(guardSlot, expected, slots, ct); if (result) Fail("erase"); return result; }
         public Task<bool> CompareExchangeAndInsertAsync(string slot, ReadOnlyMemory<byte> expected,

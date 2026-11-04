@@ -386,11 +386,8 @@ internal static class ProtectedInitialKeyRetirementJournal
     private static async Task RequireExactOwnerHashesAsync(IDeepSecureStorage storage, string[] slots,
         byte[]?[] hashes, CancellationToken ct)
     {
-        using var actual = await storage.ReadOwnedBatchAsync(slots, ct).ConfigureAwait(false);
-        if (actual.Count != slots.Length) throw new InvalidDataException("Initial retirement owner readback has another shape.");
-        for (var index = 0; index < slots.Length; index++)
-            if (hashes[index] is { } expected ? actual[index]?.Use(bytes => Fixed(SHA256.HashData(bytes), expected)) != true : actual[index] is not null)
-                throw new CryptographicException("Initial retirement owners changed across cancellation source callbacks.");
+        var guards = Enumerable.Range(0, slots.Length).ToDictionary(index => slots[index], index => hashes[index], StringComparer.Ordinal);
+        using var actual = await storage.ReadOwnedGuardedBatchAsync([], guards, ct).ConfigureAwait(false);
     }
 
     // The account opener already decoded these owners and the SQL instance from

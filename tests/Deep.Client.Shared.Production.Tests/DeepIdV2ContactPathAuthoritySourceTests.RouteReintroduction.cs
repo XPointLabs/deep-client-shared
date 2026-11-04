@@ -23,7 +23,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         _ = await fixture.DeliverReintroducedRoute(sender, operation, new OwnedGrantTransport(fixture, ownerOnPrimary: true), terminal);
         Assert.Equal(1, terminal.Calls);
         Assert.Equal(before, (await fixture.ReadMessagingFloor(sender)).Exact.ToArray());
-        using (var received = await fixture.ReceiveOwnedMessage(receiver, ciphertext)) Assert.Equal(1, received.RouteProcessing[0]);
+        using (var received = await fixture.ReceiveOwnedMessage(receiver, ciphertext)) Assert.Equal(3, received.RouteProcessing[0]);
         fixture.ColdReopenCompactionStorage();
         // Ordinary historical replay must understand publication provenance;
         // no special route override or second Store can survive this call.

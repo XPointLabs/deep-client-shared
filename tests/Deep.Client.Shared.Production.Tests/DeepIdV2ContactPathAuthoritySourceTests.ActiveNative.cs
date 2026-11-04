@@ -309,9 +309,9 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             return nativeOwner.CompactOwnedMessagingPrefixAsync(1_000, pq, scope, rows, default);
         }
 
-        internal async Task<(Did2MessagingSessionScope Sender, Did2MessagingSessionScope Receiver)> PrepareActiveNativePair()
+        internal async Task<(Did2MessagingSessionScope Sender, Did2MessagingSessionScope Receiver)> PrepareActiveNativePair(int oneTimeIndex = -1)
         {
-            var (complete, hello, init, _, _) = await PrepareNativeHelloCompletion(Bytes(32, 0xe1));
+            var (complete, hello, init, _, _) = await PrepareNativeHelloCompletion(Bytes(32, 0xe1), oneTimeIndex: oneTimeIndex);
             using var initial = await complete(Accounts);
             using (var received = await CompleteReceiver(initial.ExactDph2.ToArray())) { }
             var sender = await EnsureSenderMessaging(init, hello);

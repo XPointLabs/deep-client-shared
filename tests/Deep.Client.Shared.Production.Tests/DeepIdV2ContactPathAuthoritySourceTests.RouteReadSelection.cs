@@ -4,6 +4,7 @@ using System.Text;
 using Deep.Client.Shared.Persistence;
 using Deep.Client.Shared.Persistence.DeviceV2;
 using Deep.Protocol.ApplicationCore;
+using Deep.Protocol.ContactV2;
 using Deep.Protocol.MessagingWire;
 using Deep.Protocol.MessagingCrypto;
 using Microsoft.Data.Sqlite;
@@ -47,14 +48,16 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         var routeOperation = route.OperationId.ToArray();
         using (var sent = await fixture.SendOwnedRouteUpdate(sender, routeOperation))
         using (var received = await fixture.ReceiveOwnedMessage(receiver, sent.ExactEnvelope.ToArray()))
-            Assert.Equal(1, received.RouteProcessing[0]);
+            Assert.Equal(3, received.RouteProcessing[0]);
         _ = await SendOrdinary("ordinary after route");
+        var archiveBefore = await fixture.ReadNativeArchive(receiver);
         if (compact)
         {
             await fixture.CompactHistoricalPeerRoutePrefix(receiver);
             fixture.ColdReopenReceiverStoreStorage();
         }
         var floor = await fixture.ReadMessagingFloor(receiver);
+        var actualArchive = await fixture.ReadNativeArchive(receiver);
         await fixture.WithRouteReadSql(receiver, (sql, connection) =>
         {
             var ordinaryAndControlRows = 0;
@@ -89,14 +92,22 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                 Assert.Equal(ExactDpe2ReceiveReplayDisposition.Fresh, context.ReceiveReplayDisposition);
                 Assert.Equal(prepared.Use(bytes => SHA256.HashData(bytes)), separate.Use(bytes => SHA256.HashData(bytes)));
             }
-            using (var controls = sql.ReadVerifiedIncomingRouteControls(floor, default).GetEnumerator())
+            // The retained legacy-control reader selects outcomes1/2. Fresh
+            // count8 controls retain immutable stage3 and use the full native
+            // iterator/selected-original boundary instead.
+            using (var legacy = sql.ReadVerifiedIncomingRouteControls(floor, default).GetEnumerator()) Assert.False(legacy.MoveNext());
+            using (var controls = sql.ReadVerifiedIncomingEvents(floor, default).GetEnumerator())
             {
-                Assert.True(controls.MoveNext());
-                var selected = controls.Current;
-                Assert.Equal(1, selected.RouteProcessing[0]);
+                OwnedDid2MessagingPersistedEvent? selected = null;
+                while (controls.MoveNext())
+                    if (Dpe2Codec.Decode(controls.Current.ExactEnvelope).OperationId.Span.SequenceEqual(routeOperation))
+                    { selected = controls.Current; break; }
+                Assert.NotNull(selected);
+                Assert.Equal(3, selected.RouteProcessing[0]);
                 using var plain = selected.OwnAuthenticatedDmc2();
                 Assert.True(plain.Use(bytes => bytes.SequenceEqual(route.ExactDmc2.Span)));
-                Assert.False(controls.MoveNext());
+                Assert.True(plain.Use(bytes => ApplicationCoreCodec.DecodeDmc2(bytes).ParsedPayload is ContactRouteHistoryDmc2Payload));
+                while (controls.MoveNext()) Assert.Equal(0, controls.Current.RouteProcessing[0]);
                 Assert.Throws<ObjectDisposedException>(() => selected.OwnAuthenticatedDmc2());
             }
             using (var cancelled = new CancellationTokenSource())
@@ -107,10 +118,13 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             }
             if (compact)
             {
-                var rollback = new Did2MessagingSqlJournal(connection, receiver,
-                    Did2MessagingHistoryCheckpoint.RegisteredEmpty(receiver));
+                archiveBefore.RequireSource(actualArchive.Source);
+                Assert.True(actualArchive.Basis.Ordinal > archiveBefore.Basis.Ordinal);
+                var rollback = new Did2MessagingSqlJournal(connection, receiver, actualArchive.Source);
+                rollback.BindArchiveRoot(archiveBefore);
                 Assert.Throws<CryptographicException>(() =>
                     rollback.ReadVerifiedIncomingRouteControls(floor, default).GetEnumerator().MoveNext());
+                Assert.Equal(floor.Exact.ToArray(), sql.VerifyTip().Exact.ToArray());
             }
             var typedColumn = defect switch
             {
@@ -118,6 +132,14 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                 "ordinary-envelope-type" => "envelope",
                 _ => null
             };
+            var affectedOperation = defect is "route-marker" or "missing-route" ? routeOperation : ordinaryOperation;
+            byte[] affectedEnvelope;
+            using (var affected = sql.ReadVerifiedOperation(floor, affectedOperation))
+            {
+                Assert.NotNull(affected);
+                affectedEnvelope = affected.ExactEnvelope.ToArray();
+            }
+            var indexed = Did2MessagingSqlJournal.ForOrdinaryRuntime(connection, receiver, actualArchive.Source, actualArchive);
             byte[]? originalHash = null;
             if (typedColumn is not null)
             {
@@ -139,7 +161,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                 "ordinary-envelope-type" => "UPDATE events SET envelope=CAST(envelope AS TEXT) WHERE operation=$op;",
                 _ => throw new InvalidOperationException("Unknown route-reader fixture defect.")
             };
-            change.Parameters.AddWithValue("$op", defect is "route-marker" or "missing-route" ? routeOperation : ordinaryOperation);
+            change.Parameters.AddWithValue("$op", affectedOperation);
             Assert.Equal(1, change.ExecuteNonQuery());
             if (typedColumn is not null)
             {
@@ -158,14 +180,17 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             // hostile state, so the target reader is actually reached and its
             // refusal is proved not to repair, delete or rewrite any SQL cell.
             var before = ReadRouteReadRawSqlProjection(connection);
-            // A previous successful snapshot must not authorize a later call
-            // after an unrelated row, representation or retained prefix changes.
-            Assert.NotNull(Record.Exception(() => sql.CreateVerifiedTransitionContext(floor, freshOperation, [])));
-            Assert.NotNull(Record.Exception(() => { using var _ = sql.ReadVerifiedTransitionState(floor, freshOperation, [], out var context); }));
+            // DR0177 defers unselected archived payload semantics. Select the
+            // actual damaged operation, rather than asking an unrelated fresh
+            // transition to scan that payload. Its rooted original must reject.
+            Assert.NotNull(Record.Exception(() => indexed.CreateVerifiedTransitionContext(floor, affectedOperation, affectedEnvelope)));
+            Assert.NotNull(Record.Exception(() => { using var _ = indexed.ReadVerifiedTransitionState(floor, affectedOperation, affectedEnvelope, out var context); }));
             var rejected = Record.Exception(() =>
             {
-                using var controls = sql.ReadVerifiedIncomingRouteControls(floor, default).GetEnumerator();
-                _ = controls.MoveNext();
+                foreach (var native in indexed.ReadVerifiedIncomingEvents(floor, default)) native.Dispose();
+                // Enumeration cannot prove that a missing archived original
+                // existed. The exact operation's independent archive proof can.
+                using var affected = indexed.ReadVerifiedOperation(floor, affectedOperation);
             });
             switch (defect)
             {
@@ -206,7 +231,8 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             using var rows = schema.ExecuteReader();
             while (rows.Read()) tables.Add((rows.GetString(0), rows.GetString(1)));
         }
-        Assert.Equal(new[] { "events", "initial_events", "journal", "ratchet", "scope" }, tables.Select(table => table.Name));
+        Assert.Equal(new[] { "archive_nodes", "archive_reducers", "archive_state", "events", "initial_events", "journal", "ratchet", "route_decisions", "scope" },
+            tables.Select(table => table.Name));
         foreach (var table in tables)
         {
             Append(Encoding.UTF8.GetBytes(table.Name)); Append(Encoding.UTF8.GetBytes(table.Sql));
@@ -218,7 +244,12 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                 while (rows.Read()) columns.Add("\"" + rows.GetString(1).Replace("\"", "\"\"", StringComparison.Ordinal) + "\"");
             }
             using var query = connection.CreateCommand();
-            var order = table.Name is "events" or "journal" ? "ordinal" : "singleton";
+            var order = table.Name switch
+            {
+                "events" or "journal" or "route_decisions" => "ordinal",
+                "archive_nodes" or "archive_reducers" => "hash",
+                _ => "singleton"
+            };
             query.CommandText = "SELECT " + string.Join(",", columns.Select(column => "typeof(" + column + "),CAST(" + column + " AS BLOB)")) +
                 " FROM \"" + table.Name + "\" ORDER BY " + order + ";";
             using var row = query.ExecuteReader();

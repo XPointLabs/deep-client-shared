@@ -3211,7 +3211,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         }
     }
 
-    private sealed class NetworkMarkerFaultStorage(IDeepSecureStorage inner) : IDeepSecureStorage
+    private sealed class NetworkMarkerFaultStorage(IDeepSecureStorage inner) : IDeepSecureStorage, IDeepSecureStorageGuardedRead
     {
         internal int NetworkMarkerSingleReads { get; set; }
         internal bool TrackNetworkMarkerReads { get; set; }
@@ -3232,6 +3232,50 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         internal Action<byte>? AfterSourceRecoveryReadGroup { get; set; }
         internal Action? AfterCompactionPartReadGroup { get; set; }
         internal int CompactionPartSingleReads { get; set; }
+        async Task<OwnedDeepSecretBatch> IDeepSecureStorageGuardedRead.ReadOwnedGuardedBatchAsync(DeepSecureStorageGuardedRead request, CancellationToken ct)
+        {
+            var returned = request.ReturnedSlots;
+            var observed = returned.Concat(request.Guards.Keys).Distinct(StringComparer.Ordinal).ToArray();
+            if (TrackApplicationReads) ApplicationReadGroups.Add(observed);
+            if (TrackNetworkMarkerReads && observed.Any(slot => slot.Contains(".network-lkg-floor.", StringComparison.Ordinal)))
+                NetworkMarkerReadGroups.Add(observed);
+            var result = await inner.ReadOwnedGuardedBatchAsync(returned, request.Guards, ct);
+            try
+            {
+                for (var index = 0; index < returned.Length; index++) ObserveRead(returned[index], result[index]);
+                bool Has(string slot) => observed.Contains(slot, StringComparer.Ordinal);
+                if (AfterCompactionRootsReadGroup is { } roots && Has(Did2CompactionPlan.Slot))
+                { AfterCompactionRootsReadGroup = null; roots(); }
+                if (AfterPairedArchivePrefixReadGroup is { } paired && Has(Did2CompactionPlan.Slot) &&
+                    Has(ProtectedDid2MessagingArchiveEnrollment.Slot) && Has(SqliteDeepIdV2AccountGeneration.ApplicationStateSlot) &&
+                    Has(ProtectedDid2ContactAcceptJournal.Slot) && Has(ProtectedDid2DirectTextJournal.Slot) && Has(ProtectedDid2GroupJournal.Slot))
+                { AfterPairedArchivePrefixReadGroup = null; paired(); }
+                if (AfterMessagingRegistrationReadGroup is { } messaging && Has(SqliteDeepIdV2AccountGeneration.CompactionRegistrationSlot) &&
+                    Has(ProtectedDid2MessagingSessionCatalog.Slot) && observed.Any(slot => slot.StartsWith("deep.store.v2.messaging.floor.", StringComparison.Ordinal)))
+                { AfterMessagingRegistrationReadGroup = null; messaging(); }
+                if (AfterCompactionPartReadGroup is { } parts && Has(ProtectedDid2CompactionPlan.PartSlot(15)))
+                { AfterCompactionPartReadGroup = null; parts(); }
+                if (AfterDeviceRegistrationReadGroup is { } device && Has(SqliteDeepIdV2AccountGeneration.DeviceStateMarkerSlot))
+                { AfterDeviceRegistrationReadGroup = null; device(); }
+                if (AfterRetirementReadGroup is { } retirement && Has(ProtectedInitialKeyRetirementJournal.Slot))
+                { AfterRetirementReadGroup = null; retirement(); }
+                if (AfterInitialSourceHeadsReadGroup is { } heads && Has(DeviceInitialSessionCheckpoint.Slot))
+                { AfterInitialSourceHeadsReadGroup = null; heads(); }
+                var receiverCheckpoint = Array.IndexOf(returned, ResponderInitialSessionCheckpoint.Slot);
+                if (AfterSourceRecoveryReadGroup is { } recovery && receiverCheckpoint >= 0 && Has(SqliteDeepIdV2AccountGeneration.CompactionRegistrationSlot))
+                {
+                    AfterSourceRecoveryReadGroup = null;
+                    var checkpoint = result[receiverCheckpoint] ?? throw new InvalidDataException();
+                    recovery(checkpoint.Use(bytes => bytes[1]));
+                }
+                if (AfterApplicationReadGroup is { } application && Has(SqliteDeepIdV2AccountGeneration.ApplicationStateSlot))
+                { AfterApplicationReadGroup = null; application(); }
+                if (AfterNetworkMarkerReadGroup is { } network && observed.Any(slot => slot.Contains(".network-lkg-floor.", StringComparison.Ordinal)))
+                { AfterNetworkMarkerReadGroup = null; network(); }
+                return result;
+            }
+            catch { result.Dispose(); throw; }
+        }
         public Task<bool> CompareAndDeleteAsync(string guardSlot, ReadOnlyMemory<byte> expected,
             IReadOnlyList<string> slots, CancellationToken ct = default) => inner.CompareAndDeleteAsync(guardSlot, expected, slots, ct);
 

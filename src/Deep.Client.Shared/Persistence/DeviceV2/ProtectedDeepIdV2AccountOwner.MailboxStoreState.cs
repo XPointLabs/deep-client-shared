@@ -56,6 +56,8 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         if (!registration.Use(bytes => FixedRoute(bytes.Slice(56, 32), instance.Span)))
             throw new CryptographicException("Mailbox state readback changed its registered account instance.");
         registration.Use(bytes => { hash.AppendData(bytes); return true; });
+        var registrationHash = registration.Use(bytes => SHA256.HashData(bytes));
+        registration.Dispose();
         if (!jointPath)
         using (var publication = await storage.ReadOwnedAsync(ProtectedDid2ContactRouteJournal.Slot, ct).ConfigureAwait(false) ??
             throw new InvalidDataException("Mailbox state lost protected publication/retained-route custody."))
@@ -97,9 +99,25 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             storage, sqlStatePath, networkId, account, instance, held, lease, ct).ConfigureAwait(false);
         try { hash.AppendData(responderReadback); }
         finally { CryptographicOperations.ZeroMemory(responderReadback); }
-        using var catalog = await new ProtectedDid2MessagingSessionCatalog(storage, networkId, account.Span, instance.Span)
-            .ReadAsync(ct).ConfigureAwait(false);
-        hash.AppendData(catalog.Exact.Span);
+        byte[] catalogHash;
+        Did2MessagingSessionScope[] scopes;
+        using (var catalog = await new ProtectedDid2MessagingSessionCatalog(storage, networkId, account.Span, instance.Span)
+            .ReadAsync(ct).ConfigureAwait(false))
+        {
+            hash.AppendData(catalog.Exact.Span); catalogHash = SHA256.HashData(catalog.Exact.Span);
+            scopes = new Did2MessagingSessionScope[catalog.Count];
+            for (var index = 0; index < scopes.Length; index++)
+            {
+                if (catalog.Phase(index) != 2) throw new IOException("Uninitialized native messaging work pins mailbox retirement.");
+                scopes[index] = Did2MessagingSessionScope.RestoreMetadata(catalog.Scope(index).Exact);
+            }
+        }
+        var guards = new Dictionary<string, byte[]?>(StringComparer.Ordinal)
+        {
+            [SqliteDeepIdV2AccountGeneration.CompactionRegistrationSlot] = registrationHash,
+            [ProtectedDid2MessagingSessionCatalog.Slot] = catalogHash,
+            [ProtectedDid2MessagingArchiveEnrollment.Slot] = null
+        };
         if (!jointPath && !stopped)
         using (var application = await SqliteDeepIdV2AccountGeneration.OpenExistingApplicationForOwnerUnderLeaseAsync(
             storage, sqlStatePath, networkId, account, instance, held, lease, ct).ConfigureAwait(false))
@@ -110,39 +128,43 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         }
         // Catalog bounds the number of databases. Each SQL verifier streams
         // bounded cells and authenticates the complete retained history/tip.
-        for (var index = 0; index < catalog.Count; index++)
+        foreach (var scope in scopes)
         {
             ct.ThrowIfCancellationRequested(); held.RequireOwner(lease);
-            if (catalog.Phase(index) != 2)
-                throw new IOException("Uninitialized native messaging work pins mailbox retirement.");
-            var scope = catalog.Scope(index);
-            using var floorRaw = await storage.ReadOwnedAsync(scope.FloorSlot, ct).ConfigureAwait(false) ??
-                throw new InvalidDataException("Mailbox state readback lost its native floor.");
-            var floor = floorRaw.Use(bytes => Did2MessagingFloor.Decode(bytes, scope));
+            string[] slots = [ProtectedDid2MessagingSessionCatalog.Slot, scope.FloorSlot,
+                Did2MessagingHistoryCheckpoint.Slot(scope), Did2MessagingArchiveRoot.Slot(scope),
+                ProtectedDid2MessagingPeerBootstrap.Slot(scope)];
+            using var roots = await storage.ReadOwnedGuardedBatchAsync(slots, guards, ct).ConfigureAwait(false);
+            using var catalog = (roots[0] ?? throw new InvalidDataException("Mailbox state readback lost its actual catalog.")).Use(bytes =>
+                ProtectedDid2MessagingSessionCatalog.Decode(bytes, networkId, account.Span, instance.Span));
+            var selected = catalog.FindExact(scope);
+            if (selected < 0 || catalog.Phase(selected) != 2)
+                throw new CryptographicException("Mailbox state readback changed its initialized native scope.");
+            var floor = (roots[1] ?? throw new InvalidDataException("Mailbox state readback lost its native floor.")).Use(bytes => Did2MessagingFloor.Decode(bytes, scope));
             if (floor.Phase != 1 || floor.Status == 2)
                 throw new IOException("Pending or latched native work pins mailbox retirement.");
-            var history = await Did2MessagingHistoryCheckpoint.ReadRegisteredAsync(storage, scope, ct).ConfigureAwait(false);
-            using var peer = await storage.ReadOwnedAsync(ProtectedDid2MessagingPeerBootstrap.Slot(scope), ct).ConfigureAwait(false) ??
-                throw new InvalidDataException("Mailbox state readback lost its protected peer.");
+            var history = (roots[2] ?? throw new InvalidDataException("Mailbox state readback lost its native history.")).Use(bytes => Did2MessagingHistoryCheckpoint.Decode(bytes, scope));
+            var archive = (roots[3] ?? throw new InvalidDataException("Mailbox state readback lost its native archive root.")).Use(bytes => Did2MessagingArchiveRoot.Decode(bytes, scope));
+            archive.RequireSource(history);
+            var peer = roots[4] ?? throw new InvalidDataException("Mailbox state readback lost its protected peer.");
             _ = peer.Use(bytes => ProtectedDid2MessagingPeerBootstrap.Restore(bytes, scope));
+            var peerHash = peer.Use(bytes => SHA256.HashData(bytes));
+            roots.Dispose(); ct.ThrowIfCancellationRequested(); held.RequireOwner(lease);
             using var connection = SqliteDeepIdV2AccountGeneration.OpenExistingMessagingForCompactionUnderLease(
                 sqlStatePath, catalog, scope, held, lease);
-            var sql = new Did2MessagingSqlJournal(connection, scope, history);
+            var sql = new Did2MessagingSqlJournal(connection, scope, history); sql.BindArchiveRoot(archive);
             if (!FixedRoute(sql.VerifyTip().Exact.Span, floor.Exact.Span))
                 throw new CryptographicException("Mailbox state readback differs from its protected native tip.");
             var projection = sql.ReadCompleteCompactionProjection();
             try
             {
                 hash.AppendData(scope.Hash); hash.AppendData(floor.Exact.Span); hash.AppendData(history.Exact.Span);
-                peer.Use(bytes => { hash.AppendData(SHA256.HashData(bytes)); return true; });
+                hash.AppendData(archive.Exact.Span); hash.AppendData(peerHash);
                 hash.AppendData(projection);
             }
             finally { CryptographicOperations.ZeroMemory(projection); }
         }
-        using var finalCatalog = await new ProtectedDid2MessagingSessionCatalog(storage, networkId, account.Span, instance.Span)
-            .ReadAsync(ct).ConfigureAwait(false);
-        if (!FixedRoute(catalog.Exact.Span, finalCatalog.Exact.Span))
-            throw new CryptographicException("Mailbox state catalog changed during readback.");
+        using var finalOwners = await storage.ReadOwnedGuardedBatchAsync([], guards, ct).ConfigureAwait(false);
         ct.ThrowIfCancellationRequested(); held.RequireOwner(lease);
         return new(contactPayload || initialPayload ? Did2CompactionPlan.RootKind.MailboxContactCustody :
             jointPath ? Did2CompactionPlan.RootKind.MailboxLocalCustody : Did2CompactionPlan.RootKind.MailboxStoreState,

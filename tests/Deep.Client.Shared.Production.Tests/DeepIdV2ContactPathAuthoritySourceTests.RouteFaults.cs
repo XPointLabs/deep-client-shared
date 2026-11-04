@@ -14,43 +14,39 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
     {
         await using var fixture = await Fixture.CreateAsync(withPeer: true, encryptedStorage: true, longMailboxWindow: true);
         var (sender, receiver) = await PrepareRouteFaultPair(fixture);
-        // Resume an actual device-signed shorter pending proposal through all
-        // owned publication phases, leaving authority for a second successor.
-        await fixture.RenewNativeSenderPublicationPastExpiryAsync(renewedRouteLifetimeSeconds: 1_000,
-            successorAdvertisementLifetimeSeconds: 2_000);
-        byte[] first; ulong firstExpiry;
-        using (var command = await fixture.CreateOwnedRouteUpdate(sender))
-        {
-            firstExpiry = ApplicationCoreCodec.DecodeDmc2(command.ExactDmc2.Span).ExpiresAtUnixMilliseconds;
-            using var sent = await fixture.SendOwnedRouteUpdate(sender, command.OperationId); first = sent.ExactEnvelope.ToArray();
-        }
-        // Actual next publication/control. Withhold only network delivery of
-        // its predecessor; never alter native SQL or manufacture qualification.
-        // Renew proactively while the withheld predecessor is STILL CURRENT;
-        // its initial staging must be the retained gap, not expiry.
-        await fixture.RenewNativeSenderPublicationPastExpiryAsync(renewedRouteLifetimeSeconds: 1_000, proactive: true);
-        byte[] second;
-        using (var command = await fixture.CreateOwnedRouteUpdate(sender))
-        {
-            Assert.Equal(2UL, System.Buffers.Binary.BinaryPrimitives.ReadUInt64BigEndian(
-                Assert.IsType<ContactRouteHistoryDmc2Payload>(ApplicationCoreCodec.DecodeDmc2(command.ExactDmc2.Span).ParsedPayload).RightCursor.Span));
-            using var sent = await fixture.SendOwnedRouteUpdate(sender, command.OperationId); second = sent.ExactEnvelope.ToArray();
-        }
+        using var controls = await fixture.PrepareFreshPagedHistoryGap(sender);
         var before = await fixture.ReadMessagingFloor(receiver);
-        byte[] staged;
-        using (var received = await fixture.ReceiveOwnedMessage(receiver, second))
-        { staged = received.RouteProcessing.ToArray(); Assert.Equal(3, staged[0]); }
-        Assert.True(fixture.CurrentProofTime * 1_000 < firstExpiry);
-        using (var late = await fixture.ReceiveOwnedMessage(receiver, first)) Assert.Equal(3, late.RouteProcessing[0]);
+        byte[] staged, finalEventHash;
+        using (var received = await fixture.ReceiveOwnedMessage(receiver, controls.Final))
+        {
+            staged = received.RouteProcessing.ToArray(); Assert.Equal(3, staged[0]);
+            Assert.True(received.RouteHistoryCatchupRequired);
+            finalEventHash = received.EventHash.ToArray();
+        }
+        var gap = await fixture.ReadMessagingFloor(receiver);
+        await fixture.RequireActualGapRequestAlreadyCommitted(receiver, before, gap, controls.Final, finalEventHash);
+        Assert.Equal(before.RatchetGeneration + 2, gap.RatchetGeneration);
+        Assert.True(fixture.CurrentProofTime * 1_000 < controls.FinalExpiry,
+            "The actual final announcement expired before the missing history was supplied.");
+        Assert.DoesNotContain(await fixture.ReadPagedNativeDecisionRows(receiver),
+            row => row.Body.Action == Did2RouteHistoryDecision.ActionKind.Promotion);
+        // Mode3 supplies retained signed history. Only the separate actual
+        // current final announcement can authorize promotion of L.
+        foreach (var prefix in controls.Prefixes)
+            using (var late = await fixture.ReceiveOwnedMessage(receiver, prefix)) Assert.Equal(3, late.RouteProcessing[0]);
+        Assert.True(fixture.CurrentProofTime * 1_000 < controls.FinalExpiry,
+            "Continuation must qualify the retained final announcement while it is actually current.");
         _ = await fixture.ContinuePagedHistory(receiver);
         var committed = await fixture.ReadMessagingFloor(receiver);
-        Assert.Equal(1, committed.Status); Assert.True(committed.Ordinal > before.Ordinal + 2);
-        Assert.Equal(before.RatchetGeneration + 2, committed.RatchetGeneration);
+        Assert.Equal(1, committed.Status);
+        Assert.True(committed.Ordinal > before.Ordinal + checked((ulong)controls.Prefixes.Count) + 1);
+        Assert.Equal(gap.RatchetGeneration + checked((ulong)controls.Prefixes.Count), committed.RatchetGeneration);
+        Assert.Equal(controls.FinalRouteHash, (await fixture.ReadPagedNativeDecisionRows(receiver))[^1].Body.EndpointHash.ToArray());
         await fixture.CompactHistoricalPeerRoutePrefix(receiver); fixture.ColdReopenReceiverStoreStorage();
-        using (var replay = await fixture.ReceiveOwnedMessage(receiver, second)) Assert.Equal(staged, replay.RouteProcessing.ToArray());
+        using (var replay = await fixture.ReceiveOwnedMessage(receiver, controls.Final)) Assert.Equal(staged, replay.RouteProcessing.ToArray());
         Assert.Equal(committed.Exact.ToArray(), (await fixture.ReadMessagingFloor(receiver)).Exact.ToArray());
         await fixture.AssertNoPagedRouteFault(receiver);
-        foreach (var bytes in new[] { first, second, staged }) CryptographicOperations.ZeroMemory(bytes);
+        CryptographicOperations.ZeroMemory(staged); CryptographicOperations.ZeroMemory(finalEventHash);
     }
 
     [Fact]
@@ -64,20 +60,22 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         // branches use actual registered PQ/owned/native producers. Receiver
         // custody is never restored, forged or assigned a parsed trust flag.
         using var branch = fixture.CaptureDisposableRouteSenderBranch();
-        byte[] first;
+        byte[] first, firstProcessing;
         using (var command = await fixture.CreateOwnedRouteUpdate(sender))
         using (var sent = await fixture.SendOwnedRouteUpdate(sender, command.OperationId)) first = sent.ExactEnvelope.ToArray();
-        using (var received = await fixture.ReceiveOwnedMessage(receiver, first)) Assert.Equal(3, received.RouteProcessing[0]);
+        using (var received = await fixture.ReceiveOwnedMessage(receiver, first))
+        { firstProcessing = received.RouteProcessing.ToArray(); Assert.Equal(3, firstProcessing[0]); }
         fixture.RestoreDisposableRouteSenderBranch(branch);
         // Advance the clone's real native counter without advertising a route.
         // Do not deliver this branch's earlier text envelope to the receiver.
         using (var text = await fixture.CreateOwnedText(sender, "withheld sender-fork branch"))
         using (var sent = await fixture.SendOwnedMessage(sender, text.OperationId, ApplicationCoreCodec.DecodeDmc2(text.ExactDmc2.Span))) { }
-        byte[] fork;
+        byte[] fork; ulong forkSequence;
         using (var command = await fixture.CreateOwnedRouteUpdate(sender))
         {
+            var message = ApplicationCoreCodec.DecodeDmc2(command.ExactDmc2.Span); forkSequence = message.SenderClientSequence;
             Assert.Equal(1UL, System.Buffers.Binary.BinaryPrimitives.ReadUInt64BigEndian(
-                Assert.IsType<ContactRouteHistoryDmc2Payload>(ApplicationCoreCodec.DecodeDmc2(command.ExactDmc2.Span).ParsedPayload).RightCursor.Span));
+                Assert.IsType<ContactRouteHistoryDmc2Payload>(message.ParsedPayload).RightCursor.Span));
             using var sent = await fixture.SendOwnedRouteUpdate(sender, command.OperationId); fork = sent.ExactEnvelope.ToArray();
         }
         var before = await fixture.ReadMessagingFloor(receiver);
@@ -87,12 +85,57 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         var committed = await fixture.ReadMessagingFloor(receiver);
         Assert.Equal(1, committed.Status); Assert.True(committed.Ordinal > before.Ordinal + 1);
         Assert.Equal(before.RatchetGeneration + 1, committed.RatchetGeneration);
+        await AssertExactReplay(fork, rejected, committed, "warm newer original");
+        await AssertExactReplay(first, firstProcessing, committed, "warm older original");
         await fixture.CompactHistoricalPeerRoutePrefix(receiver); fixture.ColdReopenReceiverStoreStorage();
-        using (var replay = await fixture.ReceiveOwnedMessage(receiver, fork)) Assert.Equal(rejected, replay.RouteProcessing.ToArray());
-        using (var replay = await fixture.ReceiveOwnedMessage(receiver, first)) Assert.Equal(3, replay.RouteProcessing[0]);
-        Assert.Equal(committed.Exact.ToArray(), (await fixture.ReadMessagingFloor(receiver)).Exact.ToArray());
+        await AssertExactReplay(fork, rejected, committed, "cold newer original");
+        await AssertExactReplay(first, firstProcessing, committed, "cold older original");
+        var priorDecision = (await fixture.ReadPagedNativeDecisionRows(receiver))[^1].Body;
+        byte[] newest, newestProcessing;
+        using (var command = await fixture.CreateOwnedRouteUpdate(sender))
+        {
+            var message = ApplicationCoreCodec.DecodeDmc2(command.ExactDmc2.Span);
+            Assert.True(message.SenderClientSequence > forkSequence);
+            var page = Assert.IsType<ContactRouteHistoryDmc2Payload>(message.ParsedPayload);
+            Assert.Equal(DeepIdV2ContactRouteHistoryMode.Announcement, page.Mode);
+            using var sent = await fixture.SendOwnedRouteUpdate(sender, command.OperationId); newest = sent.ExactEnvelope.ToArray();
+        }
+        using (var received = await fixture.ReceiveOwnedMessage(receiver, newest))
+        { newestProcessing = received.RouteProcessing.ToArray(); Assert.Equal(3, newestProcessing[0]); }
+        var promoted = await fixture.ReadMessagingFloor(receiver);
+        var promotion = (await fixture.ReadPagedNativeDecisionRows(receiver))[^1].Body;
+        Assert.Equal(committed.Ordinal + 2, promoted.Ordinal); // One actual receive and one current promotion.
+        Assert.Equal(committed.RatchetGeneration + 1, promoted.RatchetGeneration);
+        Assert.Equal(Did2RouteHistoryDecision.ActionKind.Promotion, promotion.Action);
+        Assert.Equal(priorDecision.C.Exact.ToArray(), promotion.C.Exact.ToArray());
+        Assert.Equal(priorDecision.P.Exact.ToArray(), promotion.P.Exact.ToArray());
+        Assert.Equal(priorDecision.EndpointHash.ToArray(), promotion.EndpointHash.ToArray());
+        Assert.False(priorDecision.L.Exact.Span.SequenceEqual(promotion.L.Exact.Span));
+        Assert.Equal(committed.Ordinal + 1, promotion.L.Ordinal);
+        await AssertExactReplay(newest, newestProcessing, promoted, "warm highest sequence");
+        await AssertExactReplay(first, firstProcessing, promoted, "warm oldest after higher sequence");
+        await fixture.CompactHistoricalPeerRoutePrefix(receiver); fixture.ColdReopenReceiverStoreStorage();
+        await AssertExactReplay(newest, newestProcessing, promoted, "cold highest sequence");
+        await AssertExactReplay(fork, rejected, promoted, "cold intermediate after higher sequence");
+        await AssertExactReplay(first, firstProcessing, promoted, "cold oldest after higher sequence");
         await fixture.AssertNoPagedRouteFault(receiver);
-        foreach (var bytes in new[] { first, fork, rejected }) CryptographicOperations.ZeroMemory(bytes);
+        foreach (var bytes in new[] { first, firstProcessing, fork, rejected, newest, newestProcessing }) CryptographicOperations.ZeroMemory(bytes);
+
+        async Task AssertExactReplay(byte[] envelope, byte[] outcome, Did2MessagingFloor expected, string phase)
+        {
+            using (var replay = await fixture.ReceiveOwnedMessage(receiver, envelope)) Assert.Equal(outcome, replay.RouteProcessing.ToArray());
+            var actual = await fixture.ReadMessagingFloor(receiver);
+            var diagnostic = phase + ": ordinal " + expected.Ordinal + " -> " + actual.Ordinal +
+                ", ratchet " + expected.RatchetGeneration + " -> " + actual.RatchetGeneration + ", floor phase " + actual.Phase;
+            if (!expected.Exact.Span.SequenceEqual(actual.Exact.Span))
+            {
+                var body = (await fixture.ReadPagedNativeDecisionRows(receiver))[^1].Body;
+                diagnostic += ", action " + body.Action + ", subject " + body.Subject + ", selected " + body.Selected.Kind + "/" +
+                    body.Selected.Direction + "/" + body.Selected.Ordinal + ", live ordinal " + body.L.Ordinal +
+                    ", completed source " + body.C.Reference.Ordinal + ", proposal source " + body.P.Reference.Ordinal;
+            }
+            Assert.True(expected.Exact.Span.SequenceEqual(actual.Exact.Span), diagnostic);
+        }
     }
 
     private static async Task<(Did2MessagingSessionScope Sender, Did2MessagingSessionScope Receiver)> PrepareRouteFaultPair(Fixture fixture)

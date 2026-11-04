@@ -166,7 +166,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         }
         var parsed = ApplicationCoreCodec.DecodeDmc2(hello);
         var greeting = Assert.IsType<ContactHelloDmc2Payload>(parsed.ParsedPayload);
-        var reducerRaw = new byte[960]; reducerRaw[0] = 1; scope.Hash.CopyTo(reducerRaw.AsSpan(4));
+        var reducerRaw = new byte[Did2MessagingArchiveReducer.Bytes]; reducerRaw[0] = 1; scope.Hash.CopyTo(reducerRaw.AsSpan(4));
         corpus.Floor.Exact.Span.CopyTo(reducerRaw.AsSpan(36)); SHA256.HashData(initial).CopyTo(reducerRaw, 224);
         var initialReference = Did2MessagingArchiveReference.Initial(SHA256.HashData(initial));
         initialReference.Exact.Span.CopyTo(reducerRaw.AsSpan(scope.IsInitiator ? 344 : 520, 88));
