@@ -203,7 +203,22 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             var rows = await opened.WithSqlAsync(sql => sql.ReadArchiveEnrollmentBatch(progress), ct).ConfigureAwait(false);
             try
             {
-                if (rows.Count == 0) break;
+                if (rows.Count == 0)
+                {
+                    if (progress.Phase == ProtectedDid2MessagingArchiveEnrollment.PhaseKind.SchemaStaged)
+                    {
+                        if (progress.SourceHistory.HistoryCount != 0 || progress.Cursor != 0 || progress.Count != 0)
+                            throw new CryptographicException("Enrollment empty build differs from its frozen source count.");
+                        await RequireArchiveEnrollmentSourcesAsync(current, scope, progress, opened, held, ct).ConfigureAwait(false);
+                        var next = progress.Advance(scope, ProtectedDid2MessagingArchiveEnrollment.PhaseKind.Building,
+                            0, 0, progress.PatriciaHash, progress.ReducerHash);
+                        await ReplaceArchiveEnrollmentProgressAsync(progress, next, ct).ConfigureAwait(false); progress = next;
+#if DEEP_TEST_INTERNALS
+                        Did2MessagingArchiveEnrollmentTestHooks.Hit(Did2MessagingArchiveEnrollmentFailpoint.AfterBatchProgress);
+#endif
+                    }
+                    break;
+                }
                 var reducer = await opened.WithSqlAsync(sql => sql.ReadEnrollmentReducer(progress), ct).ConfigureAwait(false);
                 var candidates = new List<Did2MessagingArchiveOriginal>(rows.Where(row => row.Reference.Direction == 1));
                 var borrowed = new List<Did2MessagingArchiveOriginal>();

@@ -164,7 +164,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             { foreach (var value in Histories.Concat(Originals).Append(Catalog).Append(Authored)) CryptographicOperations.ZeroMemory(value); }
         }
 
-        internal async Task<ArchiveSourceObservation> StageActualLegacyArchiveInput(Did2MessagingSessionScope[] scopes)
+        internal async Task<ArchiveSourceObservation> StageActualLegacyArchiveInput(Did2MessagingSessionScope[] scopes, bool archivePrefix = true)
         {
             Assert.All(scopes, scope => Assert.True(scope.IsInitiator));
             var floors = new List<Did2MessagingFloor>(); var histories = new List<byte[]>();
@@ -179,10 +179,16 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                     // source verifier before reproducing its already-committed
                     // legacy prefix outcome. This is test setup, not enrollment
                     // or compaction authorization and never touches retained data.
-                    oldHistory = full.CaptureHistoryPrefix(floor, checked((int)floor.Ordinal));
-                    using var transaction = connection.BeginTransaction();
-                    using (var trim = connection.CreateCommand())
+                    oldHistory = archivePrefix ? full.CaptureHistoryPrefix(floor, checked((int)floor.Ordinal)) : before;
+                    if (!archivePrefix)
                     {
+                        Assert.Equal(0UL, oldHistory.HistoryCount);
+                        Assert.Equal(floor.Exact.ToArray(), full.VerifyTip().Exact.ToArray());
+                    }
+                    using var transaction = connection.BeginTransaction();
+                    if (archivePrefix)
+                    {
+                        using var trim = connection.CreateCommand();
                         trim.Transaction = transaction; trim.CommandText = "DELETE FROM journal WHERE ordinal<=$ordinal;";
                         trim.Parameters.AddWithValue("$ordinal", checked((long)floor.Ordinal));
                         Assert.Equal(checked((int)floor.Ordinal), trim.ExecuteNonQuery());
@@ -262,8 +268,8 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             {
                 using var root = await storage.ReadOwnedAsync(Did2MessagingArchiveRoot.Slot(scope)); Assert.NotNull(root);
                 var archive = root!.Use(bytes => Did2MessagingArchiveRoot.Decode(bytes, scope));
-                archive.RequireSource(await ReadNativeHistory(scope));
-                Assert.Equal(1UL, archive.Revision); Assert.True(archive.ArchiveCount > 0);
+                var history = await ReadNativeHistory(scope); archive.RequireSource(history);
+                Assert.Equal(1UL, archive.Revision); Assert.Equal(history.HistoryCount, archive.ArchiveCount);
                 await WithArchiveFixtureSql(scope, connection =>
                 {
                     using var mirror = connection.CreateCommand(); mirror.CommandText = "SELECT exact FROM archive_state WHERE singleton=1;";

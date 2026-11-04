@@ -181,3 +181,25 @@ the existing four schema-refusal cases; no skips, inputs unchanged. Real LF/CRLF
 reopens preserved message data and stored schema bytes; quoted contents,
 escaped delimiters, comment quote handling and structural tampering retained
 their exact boundaries. The next evidence is the same retained CLI profiles.
+
+## Empty archive enrollment recovery
+
+The matching retained candidate passed all three original-source snapshots but
+stopped in the first profile's actual enrollment. Read-only authenticated
+inspection found SchemaStaged revision2, with zero history/cursor/count and a
+nonzero active source floor. The producer attempted FinalReady directly, skipping
+the required Building transition; the transition validator correctly rejected it.
+
+The producer now records Building after checking the genuinely empty batch,
+the frozen zero history/cursor/count and the complete source guards. Advance,
+Decode and final-root checks are unchanged. Build36 passed with zero warnings
+and errors. q19 passed all24 cases, including two real encrypted cold-resume
+cases interrupted after SchemaStaged/Building, exact original preservation,
+idempotent full audit and fresh native send/receive;2330 inputs unchanged.
+
+The actual first-attempt external RAM snapshots were lost when that run failed.
+Retained recovery must use the protected frozen source guards and existing owner,
+then capture a new external baseline; it must not claim the first snapshot was
+reconstructed. No reset or new business round has occurred. The complete Shared
+reference union now contains2272 identities; full qualification remains deferred
+until the user's goal-first measurement and stabilization are complete.
