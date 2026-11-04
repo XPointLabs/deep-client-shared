@@ -255,7 +255,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             if (AuthenticatedDirectDmc2.IsDirectKind(stagedEvent.ContentKind))
             {
                 var stable = await opened.Custody.ReconcileAsync(ct).ConfigureAwait(false);
-                using var handoff = AuthenticatedDirectDmc2.FromOwnedDid2Commit(opened, stable, op, send ? exact : []);
+                using var handoff = await AuthenticatedDirectDmc2.FromOwnedDid2CommitAsync(opened, stable, op, send ? exact : [], ct).ConfigureAwait(false);
                 using var application = await SqliteDeepIdV2AccountGeneration.OpenApplicationUnderLeaseAsync(
                     storage, sqlStatePath, current, held, ct).ConfigureAwait(false);
                 var disposition = await application.MaterializeDirectDmc2Async(handoff, ct).ConfigureAwait(false);
@@ -414,7 +414,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 using var mutation = OwnedDid2MessagingMutation.Ratchet(opened.Scope, floor, plan, sendEventHash, routeOutcome);
                 current = await opened.Custody.CommitOwnedAsync(mutation, cancellationToken).ConfigureAwait(false);
             }
-            using var retained = await opened.WithSqlAsync(sql => sql.ReadVerifiedOperation(current, operation), ct).ConfigureAwait(false) ??
+            using var retained = await opened.WithSqlAsync(sql => sql.ReadVerifiedOperation(current, operation), cancellationToken).ConfigureAwait(false) ??
                 throw new CryptographicException("DID2 transaction has no verified durable event.");
             if (retained.Direction != (send ? 1 : 2) ||
                 !Did2MessagingSessionScope.Fixed(retained.ExactEnvelope, snapshot.ExactEnvelope) ||

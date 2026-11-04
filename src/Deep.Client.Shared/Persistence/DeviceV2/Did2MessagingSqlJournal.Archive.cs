@@ -7,7 +7,8 @@ namespace Deep.Client.Shared.Persistence.DeviceV2;
 
 internal sealed partial class Did2MessagingSqlJournal
 {
-    private ReadOnlySpan<byte> ArchiveInitialHeaderHash => archiveRoot is null ? historyRoot.InitialHeaderHash : ReadArchiveReducer().InitialMetadataHash;
+    private ReadOnlySpan<byte> ReadArchiveInitialHeaderHash(SqliteTransaction? tx)
+        => archiveRoot is null ? historyRoot.InitialHeaderHash : ReadArchiveReducer(tx).InitialMetadataHash;
 
     internal static byte[] ArchiveSchemaHash(int version)
     {
@@ -35,6 +36,7 @@ internal sealed partial class Did2MessagingSqlJournal
     internal void StageArchiveSchema(ProtectedDid2MessagingArchiveEnrollment progress,
         Did2MessagingArchiveBuilder.Result initial, Did2MessagingArchiveReducer reducer)
     {
+        RequireOpenedEnrollmentProgress(progress);
         if (!archiveEnrollment || progress.Phase != ProtectedDid2MessagingArchiveEnrollment.PhaseKind.SourceFrozen ||
             !Fixed(progress.ScopeHash, scope.Hash) || !Fixed(progress.PatriciaHash, initial.PatriciaHash.Span) ||
             !Fixed(progress.ReducerHash, reducer.Digest.Span)) throw new InvalidOperationException("Only exact stored enrollment may stage archive schema.");
@@ -42,6 +44,8 @@ internal sealed partial class Did2MessagingSqlJournal
         if (PragmaInteger("user_version") == SchemaVersion)
         {
             ValidateSchemaVersion(SchemaVersion);
+            using var mirror = Command("SELECT count(*) FROM archive_state;");
+            if (Convert.ToInt64(mirror.ExecuteScalar()) != 0) throw new CryptographicException("SourceFrozen schema stage has an unexpected archive mirror.");
             RequireStagedArchive(initial, reducer);
             return;
         }

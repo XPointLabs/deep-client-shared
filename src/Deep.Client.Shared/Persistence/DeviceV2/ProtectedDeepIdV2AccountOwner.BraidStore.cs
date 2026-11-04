@@ -25,17 +25,17 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             own, source, ct).ConfigureAwait(false);
     }
 
-    private static OwnedDid2BraidControlPersistedEvent RequireOwnedBraidSend(OwnedDid2MessagingStorage opened,
-        Did2MessagingSessionScope scope, Did2MessagingFloor floor, ReadOnlySpan<byte> operation)
+    private static async Task<OwnedDid2BraidControlPersistedEvent> RequireOwnedBraidSendAsync(OwnedDid2MessagingStorage opened,
+        Did2MessagingSessionScope scope, Did2MessagingFloor floor, ReadOnlyMemory<byte> operation, CancellationToken ct)
     {
-        if (await opened.WithSqlAsync(sql => sql.ReadVerifiedNativeEventDirection(floor, operation), ct).ConfigureAwait(false) != 3)
+        if (await opened.WithSqlAsync(sql => sql.ReadVerifiedNativeEventDirection(floor, operation.Span), ct).ConfigureAwait(false) != 3)
             throw new CryptographicException("Control Store requires an actual authenticated native send.");
-        var retained = await opened.WithSqlAsync(sql => sql.ReadVerifiedBraidControl(floor, operation), ct).ConfigureAwait(false) ??
+        var retained = await opened.WithSqlAsync(sql => sql.ReadVerifiedBraidControl(floor, operation.Span), ct).ConfigureAwait(false) ??
             throw new CryptographicException("Control Store lost its committed exact frame.");
         try
         {
             var frame = Dbr2Codec.Decode(retained.ExactControl);
-            if (!FixedRoute(frame.OperationId.Span, operation) || !FixedRoute(frame.NetworkId.Span, scope.Network) ||
+            if (!FixedRoute(frame.OperationId.Span, operation.Span) || !FixedRoute(frame.NetworkId.Span, scope.Network) ||
                 !FixedRoute(frame.SessionId.Span, scope.Session) || !FixedRoute(frame.SenderDeviceId.Span, scope.LocalDevice) ||
                 !FixedRoute(frame.RecipientDeviceId.Span, scope.RemoteDevice))
                 throw new CryptographicException("Control Store differs from its native session/direction.");
@@ -50,7 +50,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
     {
         held.RequireOwner(lease); ct.ThrowIfCancellationRequested();
         var floor = await opened.Custody.ReconcileAsync(ct).ConfigureAwait(false);
-        using var native = RequireOwnedBraidSend(opened, scope, floor, operation.Span);
+        using var native = await RequireOwnedBraidSendAsync(opened, scope, floor, operation, ct).ConfigureAwait(false);
         if (!FixedRoute(native.ExactControl, exact.Span))
             throw new CryptographicException("Control dispatch cannot remint its original native frame.");
         var frame = Dbr2Codec.Decode(native.ExactControl);
@@ -68,7 +68,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         held.RequireOwner(lease); ct.ThrowIfCancellationRequested();
         if (evidence.HasPublication) throw new CryptographicException("Control Store cannot acquire publication evidence.");
         var floor = await opened.Custody.ReconcileAsync(ct).ConfigureAwait(false);
-        using var native = RequireOwnedBraidSend(opened, scope, floor, operation.Span);
+        using var native = await RequireOwnedBraidSendAsync(opened, scope, floor, operation, ct).ConfigureAwait(false);
         using var application = await SqliteDeepIdV2AccountGeneration.OpenExistingApplicationForCompactionUnderLeaseAsync(
             storage, sqlStatePath, scope, held, lease, ct).ConfigureAwait(false);
         var attempt = await RequireCurrentStoreEvidenceAttemptUnderLeaseAsync(current, held, opened, scope, operation,
@@ -80,7 +80,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             var final = await opened.Custody.ReconcileAsync(ct).ConfigureAwait(false);
             if (!FixedRoute(final.Exact.Span, floor.Exact.Span))
                 throw new CryptographicException("Control evidence lost its actual stable native predecessor.");
-            using var rechecked = RequireOwnedBraidSend(opened, scope, final, operation.Span);
+            using var rechecked = await RequireOwnedBraidSendAsync(opened, scope, final, operation, ct).ConfigureAwait(false);
             if (!FixedRoute(native.ExactControl, rechecked.ExactControl))
                 throw new CryptographicException("Control evidence changed its retained frame.");
             ct.ThrowIfCancellationRequested(); held.RequireOwner(lease);
@@ -99,7 +99,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         held.RequireOwner(lease); ct.ThrowIfCancellationRequested();
         RequireRetainedStoreOwnScope(scope, own);
         var floor = await opened.Custody.ReconcileAsync(ct).ConfigureAwait(false);
-        using var native = RequireOwnedBraidSend(opened, scope, floor, operation.Span);
+        using var native = await RequireOwnedBraidSendAsync(opened, scope, floor, operation, ct).ConfigureAwait(false);
         using var raw = await storage.ReadOwnedAsync(ProtectedDid2MailboxSendJournal.Slot, ct).ConfigureAwait(false) ??
             throw new InvalidDataException("Control Store lost mandatory original send custody.");
         var sendRoot = raw.Use(bytes => bytes.ToArray());
@@ -135,7 +135,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             var finalFloor = await opened.Custody.ReconcileAsync(ct).ConfigureAwait(false);
             if (!FixedRoute(floor.Exact.Span, finalFloor.Exact.Span))
                 throw new CryptographicException("Historical control Store changed its protected native floor.");
-            using var rechecked = RequireOwnedBraidSend(opened, scope, finalFloor, operation.Span);
+            using var rechecked = await RequireOwnedBraidSendAsync(opened, scope, finalFloor, operation, ct).ConfigureAwait(false);
             if (!FixedRoute(exact, rechecked.ExactControl))
                 throw new CryptographicException("Historical control Store changed its committed frame.");
             await RequireExactProtectedMailboxRootAsync(ProtectedDid2MailboxSendJournal.Slot, sendRoot, ct).ConfigureAwait(false);

@@ -63,6 +63,24 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         var pending = await fixture.PrepareNativeHelloCompletion(Bytes(32, 0xc8), oneTimeIndex: 2);
         using var completed = await pending.Complete(fixture.Accounts);
         using var original = await fixture.StageActualLegacyArchiveInput([first.Sender, second.Sender]);
+        await Assert.ThrowsAsync<CryptographicException>(async () =>
+        { using var ordinary = await fixture.ReadSenderCompactionCurrent(); });
+        await fixture.AssertArchiveSourceUnchanged(original);
+        using (var catalog = await fixture.NativeStorage(first.Sender).ReadOwnedAsync(ProtectedDid2MessagingSessionCatalog.Slot))
+        {
+            Assert.NotNull(catalog);
+            Assert.True(catalog!.Use(bytes => bytes.SequenceEqual(original.Catalog)), "Rejected ordinary V1 admission changed the actual catalog.");
+        }
+        foreach (var scope in original.Scopes)
+        {
+            using var missing = await fixture.NativeStorage(scope).ReadOwnedAsync(Did2MessagingArchiveRoot.Slot(scope));
+            Assert.Null(missing);
+        }
+        using (var plan = await ProtectedDid2CompactionPlan.ReadRegisteredAsync(fixture.NativeStorage(first.Sender),
+            Fixture.Network, first.Sender.LocalAccount.ToArray(), first.Sender.Instance.ToArray(), default))
+            Assert.Equal(0, plan.Phase);
+        using (var parts = await ProtectedDid2CompactionPlan.ReadPartsAsync(fixture.NativeStorage(first.Sender), default))
+            for (var index = 0; index < parts.Count; index++) Assert.Null(parts[index]);
         var hit = false;
         using (Did2MessagingArchiveEnrollmentTestHooks.Push(point =>
             { if (point.ToString() == "AfterCatalogAndRoot") { hit = true; throw new IOException("First session adopted before account cleanup."); } }))
@@ -82,7 +100,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         // Registration is checked through the same previously completed native
         // source after the account-wide barrier is actually gone.
         var registered = await fixture.EnsureSenderMessaging(pending.Init, pending.Hello);
-        Assert.False(original.Scopes.Any(scope => scope.Exact.SequenceEqual(registered.Exact)));
+        Assert.DoesNotContain(original.Scopes, scope => scope.Exact.SequenceEqual(registered.Exact));
     }
 
     [Fact]
@@ -121,7 +139,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             var receiver = await EnsureReceiverMessaging(initial.ExactDph2.ToArray());
             var acceptanceOperation = Bytes(32, checked((byte)(0xd1 + index)));
             using (var accept = await PrepareOwnedContactAccept(receiver, acceptanceOperation))
-            using (var sent = await SendOwnedMessage(receiver, accept.Operation, ApplicationCoreCodec.DecodeDmc2(accept.ExactDmc2)))
+            using (var sent = await SendOwnedMessage(receiver, accept.Operation.ToArray(), ApplicationCoreCodec.DecodeDmc2(accept.ExactDmc2)))
             using (var received = await ReceiveOwnedMessage(sender, sent.ExactEnvelope.ToArray())) { }
             using (var draft = await CreateOwnedText(sender, "actual native archived source " + index))
             using (var sent = await SendOwnedMessage(sender, draft.OperationId, ApplicationCoreCodec.DecodeDmc2(draft.ExactDmc2.Span)))

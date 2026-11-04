@@ -104,13 +104,21 @@ internal static partial class SqliteDeepIdV2AccountGeneration
         ReadOnlyMemory<byte> account, Did2MessagingSessionScope scope, CancellationToken ct)
         => OpenRegisteredMessagingCoreAsync(storage, accountPath, network, account, scope, NativeArchiveAlgorithm.EnrollmentSelection, ct);
 
+    internal static Task<OwnedDid2MessagingStorage> OpenOwnedArchiveEnrollmentUnderLeaseAsync(IDeepSecureStorage storage,
+        string accountPath, VerifiedDeepIdV2CurrentAccount current, Did2MessagingSessionScope scope, CancellationToken ct)
+        => OpenOwnedMessagingCoreAsync(storage, accountPath, current, scope, NativeArchiveAlgorithm.Enrollment, ct);
+
+    internal static Task<OwnedDid2MessagingStorage> OpenOwnedArchiveEnrollmentSelectionUnderLeaseAsync(IDeepSecureStorage storage,
+        string accountPath, VerifiedDeepIdV2CurrentAccount current, Did2MessagingSessionScope scope, CancellationToken ct)
+        => OpenOwnedMessagingCoreAsync(storage, accountPath, current, scope, NativeArchiveAlgorithm.EnrollmentSelection, ct);
+
     private static async Task<OwnedDid2MessagingStorage> OpenRegisteredMessagingCoreAsync(
         IDeepSecureStorage storage, string accountPath, ReadOnlyMemory<byte> network,
         ReadOnlyMemory<byte> account, Did2MessagingSessionScope scope, NativeArchiveAlgorithm algorithm, CancellationToken ct)
     {
         var checkpoint = new Did2MessagingProtectedCheckpoint(storage, scope);
         var result = new OwnedDid2MessagingStorage(scope, checkpoint,
-            token => OpenRegisteredMessagingSegmentAsync(storage, accountPath, network, account, scope, algorithm, token));
+            (token, paired) => OpenRegisteredMessagingSegmentAsync(storage, accountPath, network, account, scope, algorithm, token, paired));
         try
         {
             var initial = await result.WithSqlAsync(sql => (Tip: sql.VerifyOrdinaryState(), Frozen: sql.HasFrozenArchiveEnrollment), ct).ConfigureAwait(false);
@@ -134,15 +142,18 @@ internal static partial class SqliteDeepIdV2AccountGeneration
 
     private static async Task<Did2MessagingSqlSegment> OpenRegisteredMessagingSegmentAsync(
         IDeepSecureStorage storage, string accountPath, ReadOnlyMemory<byte> network,
-        ReadOnlyMemory<byte> account, Did2MessagingSessionScope scope, NativeArchiveAlgorithm algorithm, CancellationToken ct)
+        ReadOnlyMemory<byte> account, Did2MessagingSessionScope scope, NativeArchiveAlgorithm algorithm, CancellationToken ct,
+        Did2MessagingArchiveAuthoredRead? paired = null)
     {
         // One bounded actual inventory owns registration selection. Only pure
         // decoders/path checks run before opening SQL; no authority callback or
         // previously successful read can supply any member of this snapshot.
-        using var inventory = await storage.ReadOwnedBatchAsync([KeySlot,
+        var slots = new List<string> { KeySlot,
             ProtectedDid2MessagingSessionCatalog.Slot, scope.FloorSlot,
             Did2MessagingHistoryCheckpoint.Slot(scope), Did2MessagingArchiveRoot.Slot(scope),
-            ProtectedDid2MessagingArchiveEnrollment.Slot, ProtectedDid2MessagingPeerBootstrap.Slot(scope)], ct).ConfigureAwait(false);
+            ProtectedDid2MessagingArchiveEnrollment.Slot, ProtectedDid2MessagingPeerBootstrap.Slot(scope) };
+        if (paired is not null) { slots.Add(ApplicationStateSlot); slots.AddRange(paired.Roots.Keys.Order(StringComparer.Ordinal)); }
+        using var inventory = await storage.ReadOwnedBatchAsync(slots, ct).ConfigureAwait(false);
         ct.ThrowIfCancellationRequested();
         var registration = inventory[0] ?? throw new InvalidDataException("The DID2 SQL key record is absent.");
         var instance = registration.Use(bytes => ReadAccountInstanceFromRegistration(bytes, network.Span, account.Span));
@@ -234,7 +245,22 @@ internal static partial class SqliteDeepIdV2AccountGeneration
             }
             finally { CryptographicOperations.ZeroMemory(comparison); }
         }
-        inventory.Dispose(); // No raw inventory is retained over SQL/storage callbacks.
+        byte[] pairedRegistration = [], pairedApplication = [];
+        var pairedRoots = new Dictionary<string, byte[]?>(StringComparer.Ordinal);
+        using var fullSourcePrefix = paired?.FullSourceHash is null ? null : CreateArchiveAuthoredPrefix(scope, slots, inventory, 8);
+        try
+        {
+            if (paired is not null)
+            {
+                pairedRegistration = registration.Use(bytes => bytes.ToArray());
+                pairedApplication = (inventory[7] ?? throw new InvalidDataException("Final paired admission lost application registration.")).Use(bytes => bytes.ToArray());
+                for (var i = 8; i < slots.Count; i++) pairedRoots.Add(slots[i], inventory[i]?.Use(bytes => SHA256.HashData(bytes)));
+            }
+            inventory.Dispose(); // In particular no raw Group/root/key loan crosses the application read.
+            if (paired is not null) VerifyPairedArchiveApplication(accountPath, scope, pairedRegistration, pairedApplication,
+                pairedRoots, paired, ct: ct, fullSourcePrefix: fullSourcePrefix);
+        }
+        finally { CryptographicOperations.ZeroMemory(pairedRegistration); CryptographicOperations.ZeroMemory(pairedApplication); }
         if (phase == 1 && !Did2MessagingSessionScope.Fixed(floor.Exact.Span, Did2MessagingFloor.Empty(scope).Exact.Span))
             throw new CryptographicException("Uninitialized DID2 messaging registration has a nonempty floor.");
         if (phase == 1 && !Did2MessagingSessionScope.Fixed(history.Exact.Span, Did2MessagingHistoryCheckpoint.RegisteredEmpty(scope).Exact.Span))
@@ -330,11 +356,14 @@ internal sealed class OwnedDid2MessagingStorage : IDisposable
 {
     private readonly Did2MessagingSessionScope scope;
     private readonly Did2MessagingProtectedCheckpoint checkpoint;
-    private readonly Func<CancellationToken, Task<Did2MessagingSqlSegment>> open;
+    private readonly Func<CancellationToken, Did2MessagingArchiveAuthoredRead?, Task<Did2MessagingSqlSegment>> open;
     private readonly Did2MessagingDurableCustody custody;
     private int disposed;
     internal OwnedDid2MessagingStorage(Did2MessagingSessionScope scope,
         Did2MessagingProtectedCheckpoint checkpoint, Func<CancellationToken, Task<Did2MessagingSqlSegment>> open)
+        : this(scope, checkpoint, (token, paired) => paired is null ? open(token) : throw new InvalidOperationException("This SQL factory has no paired authored-source admission.")) { }
+    internal OwnedDid2MessagingStorage(Did2MessagingSessionScope scope,
+        Did2MessagingProtectedCheckpoint checkpoint, Func<CancellationToken, Did2MessagingArchiveAuthoredRead?, Task<Did2MessagingSqlSegment>> open)
     {
         this.scope = scope; this.checkpoint = checkpoint; this.open = open;
         custody = new Did2MessagingDurableCustody(scope, checkpoint, this);
@@ -342,7 +371,11 @@ internal sealed class OwnedDid2MessagingStorage : IDisposable
     internal Did2MessagingSessionScope Scope { get { RequireLive(); return scope; } }
     internal Did2MessagingProtectedCheckpoint Checkpoint { get { RequireLive(); return checkpoint; } }
     internal Did2MessagingDurableCustody Custody { get { RequireLive(); return custody; } }
-    internal async Task<T> WithSqlAsync<T>(Func<Did2MessagingSqlJournal, T> operation, CancellationToken ct)
+    internal Task<T> WithSqlAsync<T>(Func<Did2MessagingSqlJournal, T> operation, CancellationToken ct)
+        => WithSqlCoreAsync(operation, null, ct);
+    internal Task<T> WithPairedSqlAsync<T>(Did2MessagingArchiveAuthoredRead paired, Func<Did2MessagingSqlJournal, T> operation, CancellationToken ct)
+        => WithSqlCoreAsync(operation, paired, ct);
+    private async Task<T> WithSqlCoreAsync<T>(Func<Did2MessagingSqlJournal, T> operation, Did2MessagingArchiveAuthoredRead? paired, CancellationToken ct)
     {
         RequireLive(); ct.ThrowIfCancellationRequested();
 #if DEEP_TEST_INTERNALS
@@ -351,7 +384,7 @@ internal sealed class OwnedDid2MessagingStorage : IDisposable
             try
             {
 #endif
-        using var segment = await open(ct).ConfigureAwait(false);
+        using var segment = await open(ct, paired).ConfigureAwait(false);
         RequireLive(); ct.ThrowIfCancellationRequested();
         var result = operation(segment.Sql);
         if (result is Task) throw new InvalidOperationException("SQL segments cannot cross an asynchronous callback.");

@@ -90,7 +90,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 // an irreversible peer fault.
                 await AuthenticatedInitialDmc2Batch.RequireRetainedMailboxRouteFactsAsync(history.Original,
                     peer, own, source, held, ct).ConfigureAwait(false);
-                var accepted = !history.Faulted && HasAvailableNativePeerControlPosition(opened, floor, message, ct) &&
+                var accepted = !history.Faulted && await HasAvailableNativePeerControlPositionAsync(opened, floor, message, ct).ConfigureAwait(false) &&
                     await history.HasConsent(checked(floor.Ordinal + 1), ct).ConfigureAwait(false);
                 VerifiedDeepIdV2UpdatedMailboxRoute? verified = null;
                 if (accepted)
@@ -165,7 +165,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         }
     }
 
-    private static bool HasAvailableNativePeerControlPosition(OwnedDid2MessagingStorage opened,
+    private static async Task<bool> HasAvailableNativePeerControlPositionAsync(OwnedDid2MessagingStorage opened,
         Did2MessagingFloor floor, ParsedDmc2 message, CancellationToken ct)
     {
         var scope = opened.Scope;
@@ -173,21 +173,6 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             message.SenderClientSequence < (scope.IsInitiator ? 4UL : 3UL) ||
             !FixedRoute(message.ConversationId.Span, scope.Conversation) ||
             !FixedRoute(update.RelationshipId.Span, scope.Relationship)) return false;
-        // The first classification joins actual authenticated positions,
-        // including unmaterialized and compacted native events, not SQL inbox
-        // counters. A different event at the same authored position is a fault.
-        foreach (var native in opened.Sql.ReadVerifiedIncomingEvents(floor, ct))
-        {
-            using var plain = native.OwnAuthenticatedDmc2();
-            var prior = plain.Use(static bytes => ApplicationCoreCodec.DecodeDmc2(bytes));
-            try
-            {
-                if (prior.SenderClientSequence == message.SenderClientSequence &&
-                    FixedRoute(prior.ConversationId.Span, message.ConversationId.Span) &&
-                    !FixedRoute(prior.CanonicalBytes.Span, message.CanonicalBytes.Span)) return false;
-            }
-            finally { if (prior.ParsedPayload is AttachmentOfferDmc2Payload offer) offer.Manifest.Dispose(); }
-        }
-        return true;
+        return await opened.WithSqlAsync(sql => sql.HasVerifiedAvailablePeerPosition(floor, message), ct).ConfigureAwait(false);
     }
 }

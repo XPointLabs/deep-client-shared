@@ -65,6 +65,17 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             }
             if (!FixedRoute((await opened.Custody.ReconcileAsync(ct).ConfigureAwait(false)).Exact.Span, floor.Exact.Span))
                 throw new CryptographicException("Historical native route changed under the owned read lease.");
+            var authoredSources = await opened.WithSqlAsync(sql => sql.ReadRouteAuthoredSources(floor, own: false), ct).ConfigureAwait(false);
+            try
+            {
+                using var authored = await QualifyArchiveAuthoredAsync(scope, authoredSources, held, ct).ConfigureAwait(false);
+                selected = await opened.WithPairedSqlAsync(authored.PairedRead, sql =>
+                {
+                    using var snapshot = sql.OpenHistoricalRouteRead(floor);
+                    return ReadHistoricalPeerRouteSnapshot(snapshot, scope, expected, accepted, winner, held, ct);
+                }, ct).ConfigureAwait(false);
+            }
+            finally { foreach (var row in authoredSources) row.Dispose(); }
             ct.ThrowIfCancellationRequested(); held.RequireOwner(lease);
             return selected;
         }
@@ -131,8 +142,27 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 }
             }
 
+            var archivedSelected = snapshot.ReadQualifiedArchivedPeerRoute(expected.ExactBytes.Span, consentOrdinal);
+            if (archivedSelected is not null) return archivedSelected;
+            using (var archivedHead = snapshot.ReadArchivedPeerHead())
+            {
+                if (archivedHead is not null)
+                {
+                    using var bytes = archivedHead.OwnAuthenticatedDmc2();
+                    var archived = bytes.Use(static raw => ApplicationCoreCodec.DecodeDmc2(raw));
+                    if (archived.ParsedPayload is ContactRouteUpdateDmc2Payload)
+                    {
+                        Did2RouteProcessingMetadata.RequireReceivedEvent(archivedHead.RouteProcessing, archived);
+                        if (archivedHead.RouteProcessing[0] != 1 || consentOrdinal == 0 || archivedHead.Ordinal <= consentOrdinal)
+                            throw new CryptographicException("Historical archive endpoint contradicts actual consent/outcome.");
+                        head = ArchiveRouteClosure(archived.CanonicalBytes.Span); headSequence = archived.SenderClientSequence;
+                        CryptographicOperations.ZeroMemory(headHash); headHash = archivedHead.EventHash.ToArray();
+                    }
+                    else if (!FixedRoute(archivedHead.EventHash, headHash)) throw new CryptographicException("Historical archive initial peer head differs.");
+                }
+            }
             ParsedContactRouteClosure? selected = FixedRoute(head.ExactBytes.Span, expected.ExactBytes.Span) ? head : null;
-            var faulted = false;
+            var faulted = snapshot.ReadArchivedPeerFault();
             foreach (var native in snapshot.ReadIncomingRouteControls(ct))
             {
                 held.RequireActive(); ct.ThrowIfCancellationRequested();

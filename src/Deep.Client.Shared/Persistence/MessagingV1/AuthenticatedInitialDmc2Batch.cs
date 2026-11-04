@@ -62,7 +62,12 @@ internal sealed class AuthenticatedInitialDmc2Batch : IDisposable
         var first = await source.RecheckEndpointPairUnderLeaseAsync(own, peer, held, ct).ConfigureAwait(false);
         OwnedInitialMessagingSeed.RequireFreshScope(scope, own.Proof, peer, first);
         var floor = await opened.Custody.ReconcileAsync(ct).ConfigureAwait(false);
-        var retained = opened.Sql.ReadVerifiedActiveInitialEvents(floor);
+        var retained = await opened.WithSqlAsync(sql =>
+        {
+            if (!Fixed(sql.ReadOpenedFloor().Exact.Span, floor.Exact.Span))
+                throw new CryptographicException("Initial protected floor changed before fresh native read.");
+            return sql.ReadVerifiedActiveInitialEvents(floor);
+        }, ct).ConfigureAwait(false);
         AuthenticatedInitialDmc2Batch? batch = null;
         try
         {
@@ -80,7 +85,12 @@ internal sealed class AuthenticatedInitialDmc2Batch : IDisposable
             var confirmedFloor = await opened.Custody.ReconcileAsync(ct).ConfigureAwait(false);
             if (!Fixed(floor.Exact.Span, confirmedFloor.Exact.Span))
                 throw new CryptographicException("Retained initial source changed during semantic verification.");
-            var confirmed = opened.Sql.ReadVerifiedActiveInitialEvents(confirmedFloor);
+            var confirmed = await opened.WithSqlAsync(sql =>
+            {
+                if (!Fixed(sql.ReadOpenedFloor().Exact.Span, confirmedFloor.Exact.Span))
+                    throw new CryptographicException("Initial protected floor changed before final native read.");
+                return sql.ReadVerifiedActiveInitialEvents(confirmedFloor);
+            }, ct).ConfigureAwait(false);
             try
             {
                 if (!Fixed(retained.SessionInit, confirmed.SessionInit) || !Fixed(retained.Hello, confirmed.Hello))

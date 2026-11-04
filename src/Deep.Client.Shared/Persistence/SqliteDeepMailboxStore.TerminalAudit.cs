@@ -37,10 +37,14 @@ public sealed partial class SqliteDeepMailboxStore
             CompleteApplicationCompactionProjection(connection, tx, scope.Hash, null, ct, omitAudits: operations));
     }
 
-    internal Task ApplyTerminalAuditExpiryAsync(IDeepSecureStorage storage, Did2CompactionPlan plan,
+    internal async Task ApplyTerminalAuditExpiryAsync(IDeepSecureStorage storage, Did2CompactionPlan plan,
         Did2MessagingSessionScope scope, ProtectedDid2DirectTextJournal.State state,
         IReadOnlyList<ProtectedDid2DirectTextJournal.TerminalAudit> selected, HeldDeepIdV2AccountLease held,
-        DeepIdV2AccountFileLease lease, CancellationToken ct) => WithReplayConnectionAsync(async connection =>
+        DeepIdV2AccountFileLease lease, CancellationToken ct, bool oldEnrollment = false)
+    {
+        held.RequireOwner(lease);
+        var roots = await ProtectedDeepIdV2AccountOwner.ReadOrdinaryOutboxRootsUnderLeaseAsync(storage, plan, scope, held, lease, ct, oldEnrollment).ConfigureAwait(false);
+        _ = await WithReplayConnectionAsync(connection =>
         {
             using var borrowed = held.BorrowFor(lease);
             if (plan.Phase != 1 || plan.Target != Did2CompactionPlan.SqlTarget.Application ||
@@ -61,7 +65,6 @@ public sealed partial class SqliteDeepMailboxStore
                         !DirectFixed(row.Commitment.Span, SHA256.HashData(ordered[index].Exact)))
                         throw new CryptographicException("Terminal audit expiry changed its selected row.");
                 }
-                var roots = await ProtectedDeepIdV2AccountOwner.ReadOrdinaryOutboxRootsUnderLeaseAsync(storage, plan, scope, held, lease, ct).ConfigureAwait(false);
                 if (plan.ObserveReadback(effects.Before, roots).Step != Did2CompactionPlan.RecoveryStep.ApplySql)
                     throw new CryptographicException("Terminal audit predecessors changed before SQL.");
                 foreach (var audit in selected)
@@ -74,11 +77,13 @@ public sealed partial class SqliteDeepMailboxStore
                 }
                 if (!DirectFixed(CompleteApplicationCompactionProjection(connection, tx, scope.Hash, null, ct), plan.SqlAfter))
                     throw new CryptographicException("Terminal audit expiry changed unrelated SQL.");
-                roots = await ProtectedDeepIdV2AccountOwner.ReadOrdinaryOutboxRootsUnderLeaseAsync(storage, plan, scope, held, lease, ct).ConfigureAwait(false);
-                if (plan.ObserveReadback(plan.SqlAfter, roots).Step != Did2CompactionPlan.RecoveryStep.RecordSqlCommit)
-                    throw new CryptographicException("Terminal audit guards changed before commit.");
-                ct.ThrowIfCancellationRequested(); held.RequireOwner(lease); tx.Commit(); return true;
+                ct.ThrowIfCancellationRequested(); held.RequireOwner(lease); tx.Commit(); return Task.FromResult(true);
             }
             finally { CryptographicOperations.ZeroMemory(effects.Before); CryptographicOperations.ZeroMemory(effects.After); }
-        }, ct);
+        }, ct).ConfigureAwait(false);
+        roots = await ProtectedDeepIdV2AccountOwner.ReadOrdinaryOutboxRootsUnderLeaseAsync(storage, plan, scope, held, lease, ct, oldEnrollment).ConfigureAwait(false);
+        var actual = await ReadCompleteMailboxStateProjectionAsync(scope.Hash.ToArray(), ct).ConfigureAwait(false);
+        if (plan.ObserveReadback(actual, roots).Step != Did2CompactionPlan.RecoveryStep.RecordSqlCommit)
+            throw new CryptographicException("Terminal audit guards changed across fresh commit readback.");
+    }
 }

@@ -3223,6 +3223,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         internal Action? AfterApplicationReadGroup { get; set; }
         internal Action? AfterMessagingRegistrationReadGroup { get; set; }
         internal Action? AfterCompactionRootsReadGroup { get; set; }
+        internal Action? AfterPairedArchivePrefixReadGroup { get; set; }
         internal Action? AfterDeviceRegistrationReadGroup { get; set; }
         internal Action? AfterRetirementReadGroup { get; set; }
         internal Action? AfterCompactionPartReadGroup { get; set; }
@@ -3316,11 +3317,20 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             try
             {
                 for (var index = 0; index < captured.Length; index++) ObserveRead(captured[index], result[index]);
-                if (AfterCompactionRootsReadGroup is { } afterRootRead && captured.Length is 6 or 11 &&
+                if (AfterCompactionRootsReadGroup is { } afterRootRead && captured.Length is 7 or 12 &&
                     captured[^1] == Did2CompactionPlan.Slot)
                 {
                     AfterCompactionRootsReadGroup = null;
                     afterRootRead();
+                }
+                if (AfterPairedArchivePrefixReadGroup is { } afterPairedRead && captured.Length == 12 &&
+                    captured[6] == Did2CompactionPlan.Slot && captured[7] == ProtectedDid2MessagingArchiveEnrollment.Slot &&
+                    captured[8] == SqliteDeepIdV2AccountGeneration.ApplicationStateSlot &&
+                    captured.Skip(9).Order(StringComparer.Ordinal).SequenceEqual(new[] { ProtectedDid2ContactAcceptJournal.Slot,
+                        ProtectedDid2DirectTextJournal.Slot, ProtectedDid2GroupJournal.Slot }.Order(StringComparer.Ordinal)))
+                {
+                    AfterPairedArchivePrefixReadGroup = null;
+                    afterPairedRead();
                 }
                 if (AfterMessagingRegistrationReadGroup is { } afterMessagingRead && captured.Length >= 4 &&
                     captured[0] == SqliteDeepIdV2AccountGeneration.CompactionRegistrationSlot &&

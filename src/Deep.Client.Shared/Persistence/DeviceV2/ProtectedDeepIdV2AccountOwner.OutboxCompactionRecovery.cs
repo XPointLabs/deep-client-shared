@@ -23,9 +23,10 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
     ];
 
     private static Did2MessagingSessionScope ResolveOrdinaryOutboxScope(Did2CompactionPlan plan,
-        ProtectedDid2MessagingSessionCatalog.Snapshot catalog)
+        ProtectedDid2MessagingSessionCatalog.Snapshot catalog, bool oldEnrollment = false)
     {
-        if (plan.Target != Did2CompactionPlan.SqlTarget.Application || plan.RootCount != OrdinaryOutboxRootKinds.Length ||
+        if ((oldEnrollment ? catalog.Version != 1 : catalog.Version != 2 || !catalog.AllIndexed) ||
+            plan.Target != Did2CompactionPlan.SqlTarget.Application || plan.RootCount != OrdinaryOutboxRootKinds.Length - (oldEnrollment ? 1 : 0) ||
             plan.SuccessorBytes < ProtectedDid2DirectTextJournal.HeaderBytes + (IsStoppedOutboxPlan(plan) ? 0 : ProtectedDid2MailboxSendJournal.HeaderBytes) ||
             plan.SuccessorBytes > ProtectedDid2DirectTextJournal.MaximumBytes + ProtectedDid2MailboxSendJournal.MaximumBytes)
             throw new InvalidDataException("No owned recovery is installed for this application compaction profile.");
@@ -40,21 +41,21 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
 
     internal static async Task<IReadOnlyList<Did2CompactionPlan.RootReadback>> ReadOrdinaryOutboxRootsUnderLeaseAsync(
         IDeepSecureStorage storage, Did2CompactionPlan plan, Did2MessagingSessionScope scope,
-        HeldDeepIdV2AccountLease held, DeepIdV2AccountFileLease lease, CancellationToken ct)
+        HeldDeepIdV2AccountLease held, DeepIdV2AccountFileLease lease, CancellationToken ct, bool oldEnrollment = false)
     {
         using var borrowed = held.BorrowFor(lease);
-        var slots = OrdinaryOutboxSlots(scope);
-        // Plan and all ten roots are one bounded authenticated revision. The
+        var slots = oldEnrollment ? OrdinaryOutboxSlots(scope)[..^1] : OrdinaryOutboxSlots(scope);
+        // Plan and the exact closed root profile are one authenticated revision. The
         // entire consumer below is pure decoding/hashing, with no callback,
         // SQL effect or await before the snapshot is disposed.
         using var inventory = await storage.ReadOwnedBatchAsync([.. slots, Did2CompactionPlan.Slot], ct).ConfigureAwait(false);
         ct.ThrowIfCancellationRequested(); held.RequireOwner(lease);
         var planRaw = inventory[slots.Length] ?? throw new InvalidDataException("Protected compaction registration is absent; explicit reset is required.");
-        using var current = planRaw.Use(bytes => Did2CompactionPlan.Decode(bytes, scope.Network, scope.LocalAccount, scope.Instance));
+        using var current = planRaw.Use(bytes => oldEnrollment ? Did2CompactionPlan.DecodeForOldEnrollment(bytes, scope.Network, scope.LocalAccount, scope.Instance) : Did2CompactionPlan.Decode(bytes, scope.Network, scope.LocalAccount, scope.Instance));
         if (!FixedRoute(current.Exact.Span, plan.Exact.Span)) throw new CryptographicException("Stored ordinary plan changed during recovery.");
         var catalogRaw = inventory[4] ?? throw new InvalidDataException("The protected DID2 messaging catalog is absent; explicit reset is required.");
-        using var catalog = catalogRaw.Use(bytes => ProtectedDid2MessagingSessionCatalog.Decode(bytes, scope.Network, scope.LocalAccount, scope.Instance));
-        if (!FixedRoute(ResolveOrdinaryOutboxScope(plan, catalog).Exact, scope.Exact)) throw new InvalidDataException("Wrong ordinary SQL scope.");
+        using var catalog = catalogRaw.Use(bytes => oldEnrollment ? ProtectedDid2MessagingSessionCatalog.DecodeForEnrollment(bytes, scope.Network, scope.LocalAccount, scope.Instance) : ProtectedDid2MessagingSessionCatalog.Decode(bytes, scope.Network, scope.LocalAccount, scope.Instance));
+        if (!FixedRoute(ResolveOrdinaryOutboxScope(plan, catalog, oldEnrollment).Exact, scope.Exact)) throw new InvalidDataException("Wrong ordinary SQL scope.");
         var result = new List<Did2CompactionPlan.RootReadback>(slots.Length);
         for (var index = 0; index < slots.Length; index++)
         {
@@ -173,11 +174,13 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             await ResumeTerminalAuditStepUnderLeaseAsync(plans, plan, catalog, held, ct).ConfigureAwait(false);
             return;
         }
-        var scope = ResolveOrdinaryOutboxScope(plan, catalog);
-        var roots = await ReadOrdinaryOutboxRootsUnderLeaseAsync(storage, plan, scope, held, lease, ct).ConfigureAwait(false);
+        var scope = ResolveOrdinaryOutboxScope(plan, catalog, archiveEnrollmentInProgress);
+        catalog.Dispose();
+        var roots = await ReadOrdinaryOutboxRootsUnderLeaseAsync(storage, plan, scope, held, lease, ct, archiveEnrollmentInProgress).ConfigureAwait(false);
         var floor = await new Did2MessagingProtectedCheckpoint(storage, scope).ReadAsync(ct).ConfigureAwait(false);
-        using var native = await SqliteDeepIdV2AccountGeneration.OpenRegisteredMessagingUnderLeaseAsync(storage, sqlStatePath,
-            scope.Network.ToArray(), scope.LocalAccount.ToArray(), scope, ct).ConfigureAwait(false);
+        using var native = archiveEnrollmentInProgress
+            ? await SqliteDeepIdV2AccountGeneration.OpenArchiveEnrollmentMessagingUnderLeaseAsync(storage, sqlStatePath, scope.Network.ToArray(), scope.LocalAccount.ToArray(), scope, ct).ConfigureAwait(false)
+            : await SqliteDeepIdV2AccountGeneration.OpenRegisteredMessagingUnderLeaseAsync(storage, sqlStatePath, scope.Network.ToArray(), scope.LocalAccount.ToArray(), scope, ct).ConfigureAwait(false);
         if (!FixedRoute((await native.WithSqlAsync(sql => sql.VerifyOrdinaryState(), ct).ConfigureAwait(false)).Exact.Span, floor.Exact.Span))
             throw new CryptographicException("Ordinary recovery lost its independent native tip.");
         using var application = await SqliteDeepIdV2AccountGeneration.OpenExistingApplicationForCompactionUnderLeaseAsync(
@@ -261,13 +264,13 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                     var selected = RequireOrdinaryPlanSelection(plan, scope, state);
                     foreach (var entry in selected)
                         await RequireNativeSelectionAsync(entry).ConfigureAwait(false);
-                    await application.ApplyStoredOrdinaryOutboxAsync(storage, plan, scope, selected, held, lease, ct).ConfigureAwait(false);
+                    await application.ApplyStoredOrdinaryOutboxAsync(storage, plan, scope, selected, held, lease, ct, archiveEnrollmentInProgress).ConfigureAwait(false);
 #if DEEP_TEST_INTERNALS
                     Did2CompactionTestHooks.Hit(Did2CompactionFailpoint.AfterSql);
 #endif
                 }
                 else if (observation.Step != Did2CompactionPlan.RecoveryStep.RecordSqlCommit) throw new InvalidDataException("Unexpected prepared ordinary observation.");
-                roots = await ReadOrdinaryOutboxRootsUnderLeaseAsync(storage, plan, scope, held, lease, ct).ConfigureAwait(false);
+                roots = await ReadOrdinaryOutboxRootsUnderLeaseAsync(storage, plan, scope, held, lease, ct, archiveEnrollmentInProgress).ConfigureAwait(false);
                 if (plan.ObserveReadback(await application.ReadCompleteOrdinaryCompactionProjectionAsync(scope, ct).ConfigureAwait(false), roots).Step != Did2CompactionPlan.RecoveryStep.RecordSqlCommit)
                     throw new CryptographicException("Ordinary SQL successor changed before commit marker.");
                 using var committedPlan = plan.WithSqlCommitted();
@@ -277,7 +280,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
 #endif
                 return;
             }
-            roots = await ReadOrdinaryOutboxRootsUnderLeaseAsync(storage, plan, scope, held, lease, ct).ConfigureAwait(false);
+            roots = await ReadOrdinaryOutboxRootsUnderLeaseAsync(storage, plan, scope, held, lease, ct, archiveEnrollmentInProgress).ConfigureAwait(false);
             var latest = plan.ObserveReadback(await application.ReadCompleteOrdinaryCompactionProjectionAsync(scope, ct).ConfigureAwait(false), roots);
             if (latest.Step != Did2CompactionPlan.RecoveryStep.AdoptRoot || latest.RootIndex != changedIndex)
                 throw new CryptographicException("Ordinary dependencies changed before root adoption.");
@@ -299,7 +302,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         if (observation.Step != Did2CompactionPlan.RecoveryStep.ClearPlan || plan.Phase is not (2 or 3))
             throw new InvalidDataException("Only a completed or unchanged abandoning ordinary batch can clear.");
         await ValidateFinishingOrdinaryPartsAsync(plan, ct).ConfigureAwait(false);
-        roots = await ReadOrdinaryOutboxRootsUnderLeaseAsync(storage, plan, scope, held, lease, ct).ConfigureAwait(false);
+        roots = await ReadOrdinaryOutboxRootsUnderLeaseAsync(storage, plan, scope, held, lease, ct, archiveEnrollmentInProgress).ConfigureAwait(false);
         if (plan.ObserveReadback(await application.ReadCompleteOrdinaryCompactionProjectionAsync(scope, ct).ConfigureAwait(false), roots).Step != Did2CompactionPlan.RecoveryStep.ClearPlan)
             throw new CryptographicException("Ordinary dependencies changed before staging disposal.");
         ct.ThrowIfCancellationRequested(); held.RequireOwner(lease);
@@ -307,7 +310,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
 #if DEEP_TEST_INTERNALS
         Did2CompactionTestHooks.Hit(Did2CompactionFailpoint.AfterPartsDeleted);
 #endif
-        roots = await ReadOrdinaryOutboxRootsUnderLeaseAsync(storage, plan, scope, held, lease, ct).ConfigureAwait(false);
+        roots = await ReadOrdinaryOutboxRootsUnderLeaseAsync(storage, plan, scope, held, lease, ct, archiveEnrollmentInProgress).ConfigureAwait(false);
         _ = plan.ObserveReadback(await application.ReadCompleteOrdinaryCompactionProjectionAsync(scope, ct).ConfigureAwait(false), roots);
         using var cleared = plan.Cleared(); await ReplaceCompactionPlanAsync(plan, cleared, held, ct).ConfigureAwait(false);
 #if DEEP_TEST_INTERNALS
@@ -379,6 +382,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             if (plan.Phase != 1) throw new InvalidOperationException("Only a prepared ordinary batch can be abandoned.");
             using var catalog = await new ProtectedDid2MessagingSessionCatalog(storage, networkId, owner.Account, owner.Instance).ReadAsync(ct).ConfigureAwait(false);
             var scope = ResolveOrdinaryOutboxScope(plan, catalog);
+            catalog.Dispose();
             var roots = await ReadOrdinaryOutboxRootsUnderLeaseAsync(storage, plan, scope, held, lease, ct).ConfigureAwait(false);
             using var application = await SqliteDeepIdV2AccountGeneration.OpenExistingApplicationForCompactionUnderLeaseAsync(storage, sqlStatePath, scope, held, lease, ct).ConfigureAwait(false);
             if (plan.ObserveReadback(await application.ReadCompleteOrdinaryCompactionProjectionAsync(scope, ct).ConfigureAwait(false), roots).Step != Did2CompactionPlan.RecoveryStep.ApplySql)

@@ -32,7 +32,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                 scope.Network.ToArray(), scope.LocalAccount.ToArray(), scope.Instance.ToArray(), default);
             var slots = new[] { ProtectedDid2MessagingSessionCatalog.Slot, scope.FloorSlot,
                 SqliteDeepIdV2AccountGeneration.CompactionRegistrationSlot, Did2MessagingHistoryCheckpoint.Slot(scope),
-                ProtectedDid2MessagingPeerBootstrap.Slot(scope), Did2CompactionPlan.Slot };
+                ProtectedDid2MessagingPeerBootstrap.Slot(scope), Did2MessagingArchiveRoot.Slot(scope), Did2CompactionPlan.Slot };
             Task<IReadOnlyList<Did2CompactionPlan.RootReadback>> Read(CancellationToken ct = default) =>
                 ProtectedDeepIdV2AccountOwner.ReadPrefixRootsUnderLeaseAsync(storage, plan, scope, held, ownerLease, ct);
             storage.TrackApplicationReads = true;

@@ -106,32 +106,31 @@ public sealed partial class SqliteDeepMailboxStore
         finally { CryptographicOperations.ZeroMemory(owned); }
     }
 
-    internal Task ApplyStoredOrdinaryOutboxAsync(IDeepSecureStorage storage, Did2CompactionPlan plan,
+    internal async Task ApplyStoredOrdinaryOutboxAsync(IDeepSecureStorage storage, Did2CompactionPlan plan,
         Did2MessagingSessionScope scope, IReadOnlyList<ProtectedDid2DirectTextJournal.Entry> selected,
-        HeldDeepIdV2AccountLease held, DeepIdV2AccountFileLease lease, CancellationToken ct) =>
-        WithReplayConnectionAsync(async connection =>
+        HeldDeepIdV2AccountLease held, DeepIdV2AccountFileLease lease, CancellationToken ct, bool oldEnrollment = false)
+    {
+        held.RequireOwner(lease);
+        if (plan.Phase != 1 || plan.Target != Did2CompactionPlan.SqlTarget.Application ||
+            !DirectFixed(plan.SqlSelector, scope.Hash) || selected.Count != plan.RowCount)
+            throw new InvalidDataException("Only an exact stored ordinary selection can enter SQL.");
+        var roots = await ProtectedDeepIdV2AccountOwner.ReadOrdinaryOutboxRootsUnderLeaseAsync(storage, plan, scope, held, lease, ct, oldEnrollment).ConfigureAwait(false);
+        _ = await WithReplayConnectionAsync(connection =>
         {
-            using var borrowed = held.BorrowFor(lease);
-            if (plan.Phase != 1 || plan.Target != Did2CompactionPlan.SqlTarget.Application ||
-                !DirectFixed(plan.SqlSelector, scope.Hash) || selected.Count != plan.RowCount)
-                throw new InvalidDataException("Only an exact stored ordinary selection can enter SQL.");
             using var tx = connection.BeginTransaction();
             var action = plan.ReadRow(0).Action;
             var effects = CaptureOrdinaryOutboxEffects(connection, tx, scope, selected, ct, action);
-            if (!DirectFixed(effects.Before, plan.SqlBefore) || !DirectFixed(effects.After, plan.SqlAfter))
-                throw new CryptographicException("Stored ordinary selection differs from complete SQL effects.");
+            if (!DirectFixed(effects.Before, plan.SqlBefore) || !DirectFixed(effects.After, plan.SqlAfter) ||
+                plan.ObserveReadback(effects.Before, roots).Step != Did2CompactionPlan.RecoveryStep.ApplySql)
+                throw new CryptographicException("Stored ordinary selection differs from exact SQL/protected predecessors.");
             var ordered = selected.OrderBy(entry => Convert.ToHexString(entry.Operation), StringComparer.Ordinal).ToArray();
             for (var index = 0; index < ordered.Length; index++)
             {
                 var row = plan.ReadRow(index);
-                if (row.Action != action ||
-                    !DirectFixed(row.Selector.Span, ordered[index].Operation) ||
+                if (row.Action != action || !DirectFixed(row.Selector.Span, ordered[index].Operation) ||
                     !DirectFixed(row.Commitment.Span, SHA256.HashData(ordered[index].Exact)))
                     throw new CryptographicException("Stored ordinary selection changed a disposition or row.");
             }
-            var roots = await ProtectedDeepIdV2AccountOwner.ReadOrdinaryOutboxRootsUnderLeaseAsync(storage, plan, scope, held, lease, ct).ConfigureAwait(false);
-            if (plan.ObserveReadback(effects.Before, roots).Step != Did2CompactionPlan.RecoveryStep.ApplySql)
-                throw new InvalidDataException("Ordinary predecessor changed before SQL.");
             foreach (var entry in selected)
             {
                 ct.ThrowIfCancellationRequested(); held.RequireOwner(lease);
@@ -144,12 +143,13 @@ public sealed partial class SqliteDeepMailboxStore
             }
             if (!DirectFixed(CompleteApplicationCompactionProjection(connection, tx, scope, null, ct), plan.SqlAfter))
                 throw new CryptographicException("Ordinary SQL effects differ before commit.");
-            roots = await ProtectedDeepIdV2AccountOwner.ReadOrdinaryOutboxRootsUnderLeaseAsync(storage, plan, scope, held, lease, ct).ConfigureAwait(false);
-            if (plan.ObserveReadback(plan.SqlAfter, roots).Step != Did2CompactionPlan.RecoveryStep.RecordSqlCommit)
-                throw new InvalidDataException("Ordinary dependencies changed before SQL commit.");
-            ct.ThrowIfCancellationRequested(); held.RequireOwner(lease); tx.Commit();
-            return true;
-        }, ct);
+            ct.ThrowIfCancellationRequested(); held.RequireOwner(lease); tx.Commit(); return Task.FromResult(true);
+        }, ct).ConfigureAwait(false);
+        roots = await ProtectedDeepIdV2AccountOwner.ReadOrdinaryOutboxRootsUnderLeaseAsync(storage, plan, scope, held, lease, ct, oldEnrollment).ConfigureAwait(false);
+        var actual = await ReadCompleteOrdinaryCompactionProjectionAsync(scope, ct).ConfigureAwait(false);
+        if (plan.ObserveReadback(actual, roots).Step != Did2CompactionPlan.RecoveryStep.RecordSqlCommit)
+            throw new CryptographicException("Ordinary dependencies changed across fresh SQL commit readback.");
+    }
 
     private static void RequireSelectedOrdinaryRow(SqliteConnection connection, SqliteTransaction tx,
         ProtectedDid2DirectTextJournal.Entry entry)

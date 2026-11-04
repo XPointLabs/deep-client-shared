@@ -10,6 +10,7 @@ internal sealed partial class Did2MessagingSqlJournal
         {
             internal long Opens, CipherScans, MetadataRows, SuffixRows, Payloads, Audits, MaintenanceBatches;
             internal ulong WorkingCount, ArchiveCount;
+            internal readonly double[] Timings = new double[8];
             public void Dispose() { if (ReferenceEquals(Current.Value, this)) Current.Value = null; }
         }
         internal static Counts Measure() { var result = new Counts(); Current.Value = result; return result; }
@@ -21,6 +22,8 @@ internal sealed partial class Did2MessagingSqlJournal
         internal static void Payload() { if (Current.Value is { } value) value.Payloads++; }
         internal static void Audit() { if (Current.Value is { } value) value.Audits++; }
         internal static void Maintenance() { if (Current.Value is { } value) value.MaintenanceBatches++; }
+        internal static void Timing(ClientPersistencePhase phase, double milliseconds)
+        { if (Current.Value is { } value) value.Timings[(int)phase] += milliseconds; }
         internal static void Inventory(ulong working, ulong archive)
         { if (Current.Value is { } value) { value.WorkingCount = working; value.ArchiveCount = archive; } }
     }

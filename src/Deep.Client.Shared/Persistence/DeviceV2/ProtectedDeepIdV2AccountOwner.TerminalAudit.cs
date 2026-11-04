@@ -117,11 +117,16 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         ProtectedDid2MessagingSessionCatalog.Snapshot catalog, HeldDeepIdV2AccountLease held, CancellationToken ct)
     {
         var scope = ResolveOrdinaryOutboxScope(plan, catalog);
-        var roots = await ReadOrdinaryOutboxRootsUnderLeaseAsync(storage, plan, scope, held, lease, ct).ConfigureAwait(false);
+        catalog.Dispose();
+        var roots = await ReadOrdinaryOutboxRootsUnderLeaseAsync(storage, plan, scope, held, lease, ct, archiveEnrollmentInProgress).ConfigureAwait(false);
         var floor = await new Did2MessagingProtectedCheckpoint(storage, scope).ReadAsync(ct).ConfigureAwait(false);
-        var history = await Did2MessagingHistoryCheckpoint.ReadRegisteredAsync(storage, scope, ct).ConfigureAwait(false);
-        using var connection = SqliteDeepIdV2AccountGeneration.OpenExistingMessagingForCompactionUnderLease(sqlStatePath, catalog, scope, held, lease);
-        if (!FixedRoute(new Did2MessagingSqlJournal(connection, scope, history).VerifyTip().Exact.Span, floor.Exact.Span))
+        using var native = archiveEnrollmentInProgress ?
+            await SqliteDeepIdV2AccountGeneration.OpenArchiveEnrollmentMessagingUnderLeaseAsync(storage, sqlStatePath,
+                scope.Network.ToArray(), scope.LocalAccount.ToArray(), scope, ct).ConfigureAwait(false) :
+            await SqliteDeepIdV2AccountGeneration.OpenRegisteredMessagingUnderLeaseAsync(storage, sqlStatePath,
+                scope.Network.ToArray(), scope.LocalAccount.ToArray(), scope, ct).ConfigureAwait(false);
+        var actualNative = await native.WithSqlAsync(sql => sql.VerifyOrdinaryState(), ct).ConfigureAwait(false);
+        if (!FixedRoute(actualNative.Exact.Span, floor.Exact.Span))
             throw new CryptographicException("Terminal audit recovery lost actual native custody.");
         using var app = await SqliteDeepIdV2AccountGeneration.OpenExistingApplicationForCompactionUnderLeaseAsync(storage,
             sqlStatePath, scope, held, lease, ct).ConfigureAwait(false);
@@ -139,13 +144,13 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 if (observation.Step == Did2CompactionPlan.RecoveryStep.ApplySql)
                 {
                     using var state = ProtectedDid2DirectTextJournal.Decode(before, scope.Network, scope.LocalAccount, scope.Instance);
-                    await app.ApplyTerminalAuditExpiryAsync(storage, plan, scope, state, SelectTerminalAuditPlan(plan, state), held, lease, ct).ConfigureAwait(false);
+                    await app.ApplyTerminalAuditExpiryAsync(storage, plan, scope, state, SelectTerminalAuditPlan(plan, state), held, lease, ct, archiveEnrollmentInProgress).ConfigureAwait(false);
 #if DEEP_TEST_INTERNALS
                     Did2CompactionTestHooks.Hit(Did2CompactionFailpoint.AfterSql);
 #endif
                     return;
                 }
-                roots = await ReadOrdinaryOutboxRootsUnderLeaseAsync(storage, plan, scope, held, lease, ct).ConfigureAwait(false);
+                roots = await ReadOrdinaryOutboxRootsUnderLeaseAsync(storage, plan, scope, held, lease, ct, archiveEnrollmentInProgress).ConfigureAwait(false);
                 if (plan.ObserveReadback(await app.ReadCompleteMailboxStateProjectionAsync(scope.Hash.ToArray(), ct).ConfigureAwait(false), roots) != observation)
                     throw new CryptographicException("Terminal audit recovery changed before its transition.");
                 if (observation.Step == Did2CompactionPlan.RecoveryStep.RecordSqlCommit)
@@ -199,14 +204,14 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         }
         using var currentRoot = adopted.Use(bytes => ProtectedDid2DirectTextJournal.Decode(bytes, scope.Network, scope.LocalAccount, scope.Instance));
         await app.ValidateCompleteStoppedAuditsAsync(currentRoot, ct).ConfigureAwait(false);
-        roots = await ReadOrdinaryOutboxRootsUnderLeaseAsync(storage, plan, scope, held, lease, ct).ConfigureAwait(false);
+        roots = await ReadOrdinaryOutboxRootsUnderLeaseAsync(storage, plan, scope, held, lease, ct, archiveEnrollmentInProgress).ConfigureAwait(false);
         if (plan.ObserveReadback(await app.ReadCompleteMailboxStateProjectionAsync(scope.Hash.ToArray(), ct).ConfigureAwait(false), roots).Step != Did2CompactionPlan.RecoveryStep.ClearPlan)
             throw new CryptographicException("Terminal audit guards changed before disposal.");
         await storage.DeleteBatchAsync(Enumerable.Range(0, plan.PartCount).Select(ProtectedDid2CompactionPlan.PartSlot).ToArray(), ct).ConfigureAwait(false);
 #if DEEP_TEST_INTERNALS
         Did2CompactionTestHooks.Hit(Did2CompactionFailpoint.AfterPartsDeleted);
 #endif
-        roots = await ReadOrdinaryOutboxRootsUnderLeaseAsync(storage, plan, scope, held, lease, ct).ConfigureAwait(false);
+        roots = await ReadOrdinaryOutboxRootsUnderLeaseAsync(storage, plan, scope, held, lease, ct, archiveEnrollmentInProgress).ConfigureAwait(false);
         if (plan.ObserveReadback(await app.ReadCompleteMailboxStateProjectionAsync(scope.Hash.ToArray(), ct).ConfigureAwait(false), roots).Step != Did2CompactionPlan.RecoveryStep.ClearPlan)
             throw new CryptographicException("Terminal audit guards changed before plan disposal.");
         using var cleared = plan.Cleared(); await ReplaceCompactionPlanAsync(plan, cleared, held, ct).ConfigureAwait(false);

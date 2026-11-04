@@ -451,7 +451,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
 
     private async ValueTask<VerifiedDeepIdV2CurrentAccount?>
         ReadCurrentUnderLeaseAsync(ulong trustedUnixSeconds,
-            IDeepMlDsa65Verifier mlDsa65, CancellationToken cancellationToken)
+            IDeepMlDsa65Verifier mlDsa65, CancellationToken cancellationToken, bool explicitArchiveEnrollment = false)
     {
         var current = await Index().ReadVerifiedAsync(trustedUnixSeconds,
             mlDsa65, cancellationToken).ConfigureAwait(false);
@@ -459,10 +459,13 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         {
             try
             {
-                await SqliteDeepIdV2AccountGeneration.EnsureAsync(sqlStatePath,
-                    storage, networkId, current.AccountId, current.DisplayName,
-                    current.Verified, allowCreate: false, cancellationToken, registrationGrammar)
-                    .ConfigureAwait(false);
+                if (explicitArchiveEnrollment)
+                    await SqliteDeepIdV2AccountGeneration.EnsureForArchiveEnrollmentAsync(sqlStatePath, storage, networkId,
+                        current.AccountId, current.DisplayName, current.Verified, cancellationToken, registrationGrammar).ConfigureAwait(false);
+                else
+                    await SqliteDeepIdV2AccountGeneration.EnsureAsync(sqlStatePath,
+                        storage, networkId, current.AccountId, current.DisplayName,
+                        current.Verified, allowCreate: false, cancellationToken, registrationGrammar).ConfigureAwait(false);
                 await SqliteDeepIdV2AccountGeneration.ReconcilePendingReceiverUnderLeaseAsync(storage, sqlStatePath,
                     current, cancellationToken).ConfigureAwait(false);
                 return current;
@@ -473,6 +476,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 throw;
             }
         }
+        if (explicitArchiveEnrollment) return null;
         var name = await ReadCreationIntentAsync(cancellationToken)
             .ConfigureAwait(false);
         var candidate = await ReadCandidateAccountIdAsync(cancellationToken)
@@ -521,10 +525,27 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
 
     private async ValueTask<VerifiedDeepIdV2CurrentAccount>
         RequireCurrentUnderLeaseAsync(ulong trustedUnixSeconds,
-            IDeepMlDsa65Verifier mlDsa65, CancellationToken cancellationToken) =>
-        await ReadCurrentUnderLeaseAsync(trustedUnixSeconds, mlDsa65,
-            cancellationToken).ConfigureAwait(false)
-        ?? throw new InvalidOperationException("No current DID2 account exists.");
+            IDeepMlDsa65Verifier mlDsa65, CancellationToken cancellationToken, bool explicitArchiveEnrollment = false)
+    {
+        var current = await ReadCurrentUnderLeaseAsync(trustedUnixSeconds, mlDsa65, cancellationToken, explicitArchiveEnrollment).ConfigureAwait(false)
+            ?? throw new InvalidOperationException("No current DID2 account exists.");
+        try
+        {
+            if (!explicitArchiveEnrollment)
+            {
+                var instance = await SqliteDeepIdV2AccountGeneration.ReadAccountInstanceUnderLeaseAsync(storage, networkId,
+                    current.AccountId, cancellationToken).ConfigureAwait(false);
+                try
+                {
+                    using var catalog = await new ProtectedDid2MessagingSessionCatalog(storage, networkId, current.AccountId.Span, instance)
+                        .ReadAsync(cancellationToken).ConfigureAwait(false);
+                }
+                finally { CryptographicOperations.ZeroMemory(instance); }
+            }
+            return current;
+        }
+        catch { current.Dispose(); throw; }
+    }
 
     private async ValueTask WriteCreationCandidateAsync(string normalizedName,
         ReadOnlyMemory<byte> candidateAccountId, CancellationToken cancellationToken)

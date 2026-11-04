@@ -32,7 +32,7 @@ internal sealed partial class Did2MessagingSqlJournal
             var transaction = owner.connection.BeginTransaction(deferred: true);
             try
             {
-                RequireSame(floor, owner.VerifyTipInTransaction(transaction));
+                owner.RequireSame(floor, owner.VerifyActiveTip(transaction, null, out _));
                 return new(owner, floor, transaction);
             }
             catch { transaction.Dispose(); throw; }
@@ -61,20 +61,80 @@ internal sealed partial class Did2MessagingSqlJournal
         {
             RequireActive();
             ProtectedDph2PreClaimJournal.RequireIntent(operation);
-            using var command = owner.Command("SELECT direction,length(envelope),envelope,length(plaintext),plaintext,metadata,ordinal FROM events WHERE operation=$op;", transaction);
-            command.Parameters.AddWithValue("$op", operation.ToArray());
-            using var row = command.ExecuteReader();
-            return owner.ReadSelectedOrdinaryEvent(floor, row);
+            using var selection = new ActiveSelection([operation.ToArray()]);
+            owner.RequireSame(floor, owner.VerifyActiveTip(transaction, selection, out _));
+            return owner.ReadCapturedOrdinaryEvent(selection[0], transaction);
         }
 
         internal OwnedDid2MessagingPersistedEvent? ReadReceiveForEvent(ReadOnlySpan<byte> eventHash)
         {
             RequireActive();
             ProtectedDph2PreClaimJournal.RequireIntent(eventHash);
-            using var command = owner.Command("SELECT direction,length(envelope),envelope,length(plaintext),plaintext,metadata,ordinal FROM events WHERE direction=2 AND substr(metadata,301,32)=$hash ORDER BY ordinal LIMIT 1;", transaction);
-            command.Parameters.AddWithValue("$hash", eventHash.ToArray());
-            using var row = command.ExecuteReader();
-            return owner.ReadSelectedOrdinaryEvent(floor, row);
+            using var selection = new ActiveSelection([eventHash.ToArray()], eventHash: true);
+            owner.RequireSame(floor, owner.VerifyActiveTip(transaction, selection, out _));
+            return owner.ReadCapturedOrdinaryEvent(selection[0], transaction);
+        }
+
+        internal OwnedDid2MessagingPersistedEvent? ReadArchivedPeerHead()
+        {
+            RequireActive(); var reference = owner.ReadArchiveReducer(transaction).Reference(Did2MessagingArchiveReducer.ReferenceKind.PeerHead);
+            if (reference.Kind != 2) return null;
+            reference.RequireAtBasis(owner.WorkingBasis.Ordinal);
+            using var tuple = owner.ReadArchivedTuple(reference, transaction);
+            return owner.ReadCapturedOrdinaryEvent(tuple, transaction);
+        }
+
+        internal bool ReadArchivedPeerFault()
+        {
+            RequireActive(); var reference = owner.ReadArchiveReducer(transaction).Reference(Did2MessagingArchiveReducer.ReferenceKind.FirstFault);
+            if (reference.IsAbsent) return false;
+            reference.RequireAtBasis(owner.WorkingBasis.Ordinal);
+            using var original = owner.ReadArchiveOriginal(reference, transaction);
+            var message = Deep.Protocol.ApplicationCore.ApplicationCoreCodec.DecodeDmc2(original.Plaintext);
+            Did2RouteProcessingMetadata.RequireReceivedEvent(original.Metadata.AsSpan(608, 64), message);
+            if (original.Metadata[608] != 2) throw new CryptographicException("Selected historical route fault changes its original outcome.");
+            return true;
+        }
+
+        internal Deep.Protocol.ContactV1.ParsedContactRouteClosure? ReadQualifiedArchivedPeerRoute(
+            ReadOnlySpan<byte> expected, ulong actualConsentOrdinal)
+        {
+            RequireActive(); var value = owner.ReadArchiveFact(Did2MessagingArchiveFamily.QualifiedPeerRoute, SHA256.HashData(expected), transaction);
+            if (value is null) return null;
+            var reference = Did2MessagingArchiveReference.Decode(value.AsSpan(0, 88), false); reference.RequireAtBasis(owner.WorkingBasis.Ordinal);
+            byte[] exact;
+            if (reference.Kind == 1)
+            {
+                var initial = owner.ReadArchiveInitialSource(transaction);
+                try
+                {
+                    if (owner.scope.IsInitiator || !Fixed(SHA256.HashData(initial.Metadata), reference.MetadataHash)) throw new CryptographicException("Historical qualified Hello changes its original.");
+                    exact = initial.Hello.ToArray();
+                }
+                finally { CryptographicOperations.ZeroMemory(initial.Metadata); CryptographicOperations.ZeroMemory(initial.Hello); }
+            }
+            else
+            {
+                using var original = owner.ReadArchiveOriginal(reference, transaction);
+                if (reference.Direction != 2) throw new CryptographicException("Historical qualified route has an outgoing witness.");
+                exact = original.Plaintext.ToArray();
+            }
+            try
+            {
+                var message = Deep.Protocol.ApplicationCore.ApplicationCoreCodec.DecodeDmc2(exact);
+                var consent = System.Buffers.Binary.BinaryPrimitives.ReadUInt64BigEndian(value.AsSpan(88));
+                var predecessor = value.AsSpan(96, 32); var sequence = System.Buffers.Binary.BinaryPrimitives.ReadUInt64BigEndian(value.AsSpan(128));
+                var closure = message.ParsedPayload switch
+                {
+                    Deep.Protocol.ApplicationCore.ContactHelloDmc2Payload hello when reference.Kind == 1 && consent == 0 && Did2MessagingSessionScope.Zero(predecessor) => hello.MailboxRoute.Route,
+                    Deep.Protocol.ApplicationCore.ContactAcceptDmc2Payload accept when owner.scope.IsInitiator && consent == reference.Ordinal && consent == actualConsentOrdinal && Did2MessagingSessionScope.Zero(predecessor) => accept.MailboxRoute.Route,
+                    Deep.Protocol.ApplicationCore.ContactRouteUpdateDmc2Payload update when consent == actualConsentOrdinal && consent != 0 && reference.Ordinal > consent && Fixed(predecessor, update.PredecessorRouteUpdateHash.Span) => Deep.Protocol.ContactV1.ContactRouteClosureCodec.Decode(update.ExactRouteClosure.Span),
+                    _ => throw new CryptographicException("Historical archive qualification changes actual consent/predecessor/source kind.")
+                };
+                if (sequence != message.SenderClientSequence || !Fixed(expected, closure.ExactBytes.Span)) throw new CryptographicException("Historical archive qualification changes the exact closure/sequence.");
+                return closure;
+            }
+            finally { CryptographicOperations.ZeroMemory(exact); }
         }
 
         // Retained history is lifetime-sized: keep ONE bounded native event at
@@ -85,7 +145,8 @@ internal sealed partial class Did2MessagingSqlJournal
         internal IEnumerable<OwnedDid2MessagingPersistedEvent> ReadIncomingRouteControls(CancellationToken ct)
         {
             RequireActive(); ct.ThrowIfCancellationRequested();
-            using var command = owner.Command("SELECT ordinal,operation,metadata,envelope,plaintext,typeof(operation),length(operation),typeof(metadata),length(metadata),typeof(envelope),length(envelope),typeof(plaintext),length(plaintext) FROM events WHERE direction=2 AND substr(metadata,$routeOffset,1) IN (X'01',X'02') ORDER BY ordinal;", transaction);
+            using var command = owner.Command("SELECT ordinal,operation,metadata,envelope,plaintext,typeof(operation),length(operation),typeof(metadata),length(metadata),typeof(envelope),length(envelope),typeof(plaintext),length(plaintext) FROM events WHERE ordinal>$basis AND direction=2 AND substr(metadata,$routeOffset,1) IN (X'01',X'02') ORDER BY ordinal;", transaction);
+            command.Parameters.AddWithValue("$basis", checked((long)owner.WorkingBasis.Ordinal));
             command.Parameters.AddWithValue("$routeOffset", Did2RouteProcessingMetadata.Offset + 1);
             using var reader = command.ExecuteReader();
             ulong previous = 0;

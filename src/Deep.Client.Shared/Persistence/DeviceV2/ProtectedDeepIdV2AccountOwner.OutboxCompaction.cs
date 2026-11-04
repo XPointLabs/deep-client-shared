@@ -119,6 +119,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         ct.ThrowIfCancellationRequested(); held.RequireOwner(lease);
         var roots = Enumerable.Range(0, slots.Length).Select(index => inventory[index] ??
             throw new InvalidDataException("Outbox selection lost a mandatory dependency.")).ToArray();
+        var rootHashes = roots.Select(root => root.Use(bytes => SHA256.HashData(bytes))).ToArray();
         var retained = new List<DirectTextOutboxEntry>(); byte[] successor = [], sendSuccessor = [];
         try
         {
@@ -135,11 +136,11 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             _ = roots[9].Use(bytes => ProtectedDid2MessagingPeerBootstrap.Restore(bytes, scope));
             roots[10].Use(bytes => Did2MessagingArchiveRoot.Decode(bytes, scope)).RequireSource(
                 roots[8].Use(bytes => Did2MessagingHistoryCheckpoint.Decode(bytes, scope)));
-            using (var registration = await SqliteDeepIdV2AccountGeneration.ReadCompactionRegistrationUnderLeaseAsync(storage,
-                scope.Network.ToArray(), scope.LocalAccount.ToArray(), ct).ConfigureAwait(false))
-                if (!registration.Use(bytes => FixedRoute(bytes.Slice(56, 32), scope.Instance)) ||
-                    !registration.Use(bytes => FixedRoute(SHA256.HashData(bytes), roots[7].Use(raw => SHA256.HashData(raw)))))
-                    throw new CryptographicException("Outbox selection differs from its actual account instance.");
+            var registeredInstance = roots[7].Use(bytes => SqliteDeepIdV2AccountGeneration.ReadAccountInstanceFromRegistration(bytes, scope.Network, scope.LocalAccount));
+            try { if (!FixedRoute(registeredInstance, scope.Instance)) throw new CryptographicException("Outbox selection differs from its actual account instance."); }
+            finally { CryptographicOperations.ZeroMemory(registeredInstance); }
+            // No copied catalog SQL key survives the next application/provider edge.
+            catalog.Dispose(); inventory.Dispose();
             // A retained suffix is required by the ordinary reader. Never skip
             // an earlier unknown command in order to reclaim a later slot.
             var candidates = journal.Entries.Values.Where(entry => FixedRoute(entry.Scope.Exact, scope.Exact)).OrderBy(entry => entry.Sequence);
@@ -208,7 +209,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             var descriptors = new List<Did2CompactionPlan.Root>();
             for (var rootIndex = 0; rootIndex < roots.Length; rootIndex++)
             {
-                var digest = roots[rootIndex].Use(bytes => SHA256.HashData(bytes));
+                var digest = rootHashes[rootIndex];
                 var changed = rootIndex == 0 ? successor : sendSuccessor;
                 descriptors.Add(rootIndex == 0 || rootIndex == 1 && !stoppedOnly
                     ? new(kinds[rootIndex], CompactionSlotSelector(slots[rootIndex]), digest, SHA256.HashData(changed), false, changed)

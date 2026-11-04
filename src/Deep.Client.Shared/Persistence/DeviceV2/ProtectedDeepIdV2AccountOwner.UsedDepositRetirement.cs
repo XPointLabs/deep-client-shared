@@ -174,10 +174,17 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                     finally { CryptographicOperations.ZeroMemory(operation); }
                 }
                 var floor = await opened.Custody.ReconcileAsync(ct).ConfigureAwait(false);
-                foreach (var operation in opened.Sql.ReadVerifiedOutgoingOperations(floor, ct))
+                ulong cursor = 0;
+                while (true)
                 {
-                    try { hasSelectedNativeWork |= await VerifyOriginal(scope, opened, operation, ct).ConfigureAwait(false); }
-                    finally { CryptographicOperations.ZeroMemory(operation); }
+                    var batch = await opened.WithSqlAsync(sql => sql.ReadVerifiedOutgoingOperationBatch(floor, cursor), ct).ConfigureAwait(false);
+                    try
+                    {
+                        foreach (var operation in batch.Operations)
+                            hasSelectedNativeWork |= await VerifyOriginal(scope, opened, operation, ct).ConfigureAwait(false);
+                    }
+                    finally { foreach (var operation in batch.Operations) CryptographicOperations.ZeroMemory(operation); }
+                    cursor = batch.Through; if (batch.Complete) break;
                 }
             }
 

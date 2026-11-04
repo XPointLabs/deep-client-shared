@@ -79,28 +79,31 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 (consent.Policy & ContactPolicy.AllowRouteUpdates) == 0)
                 throw new CryptographicException("Actual native acceptance forbids own private route updates.");
             var head = original.Route;
-            foreach (var native in opened.Sql.ReadVerifiedOutgoingEvents(floor, ct))
+            using var snapshot = await ReadNativeRouteSnapshotAsync(opened, floor, own: true, held, ct).ConfigureAwait(false);
+            if (snapshot.Head(own: true) is { } archivedHead)
+            {
+                var parsedHead = ApplicationCoreCodec.DecodeDmc2(archivedHead);
+                if (parsedHead.ParsedPayload is ContactRouteUpdateDmc2Payload)
+                {
+                    var previous = snapshot.Previous(own: true) ?? (scope.IsInitiator ? initial.Hello : accepted);
+                    if (snapshot.Archive.Reducer.Reference(Did2MessagingArchiveReducer.ReferenceKind.OwnHead).Ordinal <= acceptanceOrdinal)
+                        throw new CryptographicException("Archived own route head precedes actual native consent.");
+                    head = await DeepIdV2ContactRouteUpdateVerifier.RequireRetainedSuccessorFactsAsync(original, own.Proof,
+                        own.Network, own.Authority, source.RendezvousTrustedTime, ArchiveRouteClosure(previous).ExactBytes,
+                        SHA256.HashData(previous), scope.Relationship.ToArray(), scope.Conversation.ToArray(), parsedHead.CanonicalBytes, ct).ConfigureAwait(false);
+                }
+                else if (!FixedRoute(archivedHead, accepted)) throw new CryptographicException("Archived own initial head changed actual acceptance.");
+                CryptographicOperations.ZeroMemory(headHash); headHash = SHA256.HashData(archivedHead);
+            }
+            foreach (var native in snapshot.Suffix)
             {
                 if (FixedRoute(native.EventHash, headHash)) continue;
                 var operation = Dpe2Codec.Decode(native.ExactEnvelope).OperationId;
                 byte[] exact = [];
                 try
                 {
-                    if (journal.Entries.TryGetValue(Convert.ToHexString(operation.Span), out var command))
-                    {
-                        if (command.Pending || !FixedRoute(command.Scope.Exact, scope.Exact) ||
-                            !FixedRoute(command.EventHash, native.EventHash))
-                            throw new CryptographicException("Native advertised history differs from its authored command.");
-                        if (command.Kind != Dmc2ContentKind.ContactRouteUpdate) continue;
-                        using var row = await application.ReconcileOwnedTextOutboxAsync(journal, current.AccountId,
-                            BinaryPrimitives.ReadUInt64BigEndian(scope.Exact[84..]), scope, operation, ct,
-                            requireStableReadOnly: true).ConfigureAwait(false);
-                        if (row is null) throw new CryptographicException("Native route control lost its actual authored SQL row.");
-                        exact = OwnedByteExports.TakeArray(row.ExactDmc2);
-                        command.RequireEvent(exact);
-                    }
-                    else exact = await ReadOwnedAuthoredHistoryUnderLeaseAsync(current, application, scope, operation, native.EventHash.ToArray(), ct).ConfigureAwait(false) ??
-                        throw new CryptographicException("Compacted native advertised history lost its exact authored event.");
+                    exact = snapshot.Authored.TryGetValue(native.Ordinal, out var authored) ? authored.ToArray() :
+                        throw new CryptographicException("Native own route suffix lost its independently authored source.");
                     var message = ApplicationCoreCodec.DecodeDmc2(exact);
                     try
                     {
@@ -128,6 +131,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             var final = await opened.Custody.ReconcileAsync(ct).ConfigureAwait(false);
             if (!FixedRoute(final.Exact.Span, floor.Exact.Span))
                 throw new CryptographicException("Own advertised native route history changed during verification.");
+            using var readback = await ReadNativeRouteSnapshotAsync(opened, floor, own: true, held, ct).ConfigureAwait(false);
             ct.ThrowIfCancellationRequested(); held.RequireOwner(lease);
             return new(original, head.ExactBytes, headHash.ToArray(), floor.Exact.ToArray());
         }

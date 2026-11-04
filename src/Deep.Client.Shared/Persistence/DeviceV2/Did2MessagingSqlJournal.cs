@@ -22,6 +22,11 @@ internal sealed partial class Did2MessagingSqlJournal(SqliteConnection connectio
     private ProtectedDid2MessagingArchiveEnrollment? enrollmentProgress;
     internal bool HasFrozenArchiveEnrollment => enrollmentProgress is not null;
     internal void BindEnrollmentProgress(ProtectedDid2MessagingArchiveEnrollment? progress) => enrollmentProgress = progress;
+    internal void RequireOpenedEnrollmentProgress(ProtectedDid2MessagingArchiveEnrollment expected)
+    {
+        if (!archiveEnrollment || enrollmentProgress is null || !Fixed(enrollmentProgress.Exact.Span, expected.Exact.Span))
+            throw new CryptographicException("Actual opened enrollment progress differs from the selected exact record.");
+    }
     internal void BindOpenedFloor(Did2MessagingFloor floor) => openedFloor = floor;
     internal Did2MessagingFloor ReadOpenedFloor()
     {
@@ -69,7 +74,7 @@ internal sealed partial class Did2MessagingSqlJournal(SqliteConnection connectio
         Did2MessagingSessionScope scope, Did2MessagingHistoryCheckpoint history,
         ProtectedDid2MessagingArchiveEnrollment? progress = null)
     {
-        var sql = new Did2MessagingSqlJournal(connection, scope, history) { archiveEnrollment = true };
+        var sql = new Did2MessagingSqlJournal(connection, scope, history) { archiveEnrollment = true, enrollmentProgress = progress };
         var version = sql.PragmaInteger("user_version");
         if (version == 6 && progress is not null) sql.archiveEnrollmentVersion = 6;
         else if (version != 5) throw new InvalidDataException("Only the exact stored enrollment progress permits staged schema6.");
@@ -248,7 +253,7 @@ internal sealed partial class Did2MessagingSqlJournal(SqliteConnection connectio
         using var tx = connection.BeginTransaction(deferred: true);
         RequireSame(protectedStable, VerifyOrdinaryTip(tx));
 #if DEEP_TEST_INTERNALS
-        Did2ActiveReadTestHooks.AfterProof(connection, tx);
+        Did2ActiveReadTestHooks.BeforeSelectedPayload();
 #endif
         return ReadLatestStateInSnapshot(tx, protectedStable);
     }
@@ -583,7 +588,7 @@ internal sealed partial class Did2MessagingSqlJournal(SqliteConnection connectio
         var header = reader.GetFieldValue<byte[]>(4);
         OwnedDid2MessagingMutation.ValidateMetadataTransition(header, scope, Did2MessagingFloor.Empty(scope));
         if (header[5] != 1 || (WorkingBasis.Ordinal == 0 ? !Fixed(header, headers[0]) :
-            !Fixed(SHA256.HashData(header), ArchiveInitialHeaderHash)))
+            !Fixed(SHA256.HashData(header), ReadArchiveInitialHeaderHash(tx))))
             throw new CryptographicException("DID2 initial metadata differs from the protected journal/history basis.");
         var envelopeBytes = reader.GetFieldValue<byte[]>(1); var initBytes = reader.GetFieldValue<byte[]>(2); var helloBytes = reader.GetFieldValue<byte[]>(3);
         try

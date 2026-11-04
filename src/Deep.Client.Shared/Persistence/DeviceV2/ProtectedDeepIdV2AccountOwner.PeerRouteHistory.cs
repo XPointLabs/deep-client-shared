@@ -20,24 +20,13 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
     {
         held.RequireOwner(lease); ct.ThrowIfCancellationRequested();
         var floor = await opened.Custody.ReconcileAsync(ct).ConfigureAwait(false);
-        foreach (var received in opened.Sql.ReadVerifiedIncomingRouteControls(floor, ct))
-        {
-            using var native = received;
-            using var plain = native.OwnAuthenticatedDmc2();
-            var message = plain.Use(static bytes => ApplicationCoreCodec.DecodeDmc2(bytes));
-            try
-            {
-                if (message.ContentKind != Dmc2ContentKind.ContactRouteUpdate) continue;
-                Did2RouteProcessingMetadata.RequireReceivedEvent(native.RouteProcessing, message);
-                if (native.RouteProcessing[0] == 2)
-                    throw new CryptographicException("Retained authenticated route fault fences this peer's new sends.");
-            }
-            finally { if (message.ParsedPayload is AttachmentOfferDmc2Payload offer) offer.Manifest.Dispose(); }
-            held.RequireOwner(lease); ct.ThrowIfCancellationRequested();
-        }
+        if (await opened.WithSqlAsync(sql => sql.ReadVerifiedPeerRouteFault(floor), ct).ConfigureAwait(false))
+            throw new CryptographicException("Retained authenticated route fault fences this peer's new sends.");
         var final = await opened.Custody.ReconcileAsync(ct).ConfigureAwait(false);
         if (!FixedRoute(floor.Exact.Span, final.Exact.Span))
             throw new CryptographicException("Native route-fault custody changed before new work.");
+        if (await opened.WithSqlAsync(sql => sql.ReadVerifiedPeerRouteFault(floor), ct).ConfigureAwait(false))
+            throw new CryptographicException("Retained authenticated route fault fences this peer's new sends.");
         held.RequireOwner(lease); ct.ThrowIfCancellationRequested();
     }
 
@@ -71,7 +60,27 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             // No highest-generation selection, cache lookup or second journal.
             // A malformed authenticated event remains in native custody and
             // causes the same refusal again after restart.
-            foreach (var received in opened.Sql.ReadVerifiedIncomingRouteControls(floor, ct))
+            using var snapshot = await ReadNativeRouteSnapshotAsync(opened, floor, own: false, held, ct).ConfigureAwait(false);
+            if (snapshot.Head(own: false) is { } archivedHead)
+            {
+                var archived = ApplicationCoreCodec.DecodeDmc2(archivedHead);
+                if (archived.ParsedPayload is ContactRouteUpdateDmc2Payload)
+                {
+                    var reference = snapshot.Archive.Reducer.Reference(Did2MessagingArchiveReducer.ReferenceKind.PeerHead);
+                    if (!await hasConsent(reference.Ordinal, ct).ConfigureAwait(false))
+                        throw new CryptographicException("Archived peer route head contradicts actual native consent.");
+                    var predecessor = snapshot.Previous(own: false) ?? originalEvent.ToArray();
+                    previousRoute = ArchiveRouteClosure(predecessor).ExactBytes.ToArray(); previousHash = SHA256.HashData(predecessor);
+                    head = await DeepIdV2ContactRouteUpdateVerifier.RequireRetainedSuccessorFactsAsync(original, peer,
+                        own.Network, own.Authority, source.RendezvousTrustedTime, previousRoute, previousHash,
+                        scope.Relationship.ToArray(), scope.Conversation.ToArray(), archived.CanonicalBytes, ct).ConfigureAwait(false);
+                    updateBytes = archivedHead.ToArray();
+                }
+                else if (!FixedRoute(archivedHead, originalEvent.Span)) throw new CryptographicException("Archived peer initial head changed its actual original.");
+                CryptographicOperations.ZeroMemory(headHash); headHash = SHA256.HashData(archivedHead);
+            }
+            faulted = !snapshot.Archive.Reducer.Reference(Did2MessagingArchiveReducer.ReferenceKind.FirstFault).IsAbsent;
+            foreach (var received in snapshot.Suffix)
             {
                 held.RequireOwner(lease);
                 using var plain = received.OwnAuthenticatedDmc2();
@@ -120,6 +129,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             var finalFloor = await opened.Custody.ReconcileAsync(ct).ConfigureAwait(false);
             if (!FixedRoute(floor.Exact.Span, finalFloor.Exact.Span))
                 throw new CryptographicException("Native route history changed during private route verification.");
+            using var readback = await ReadNativeRouteSnapshotAsync(opened, floor, own: false, held, ct).ConfigureAwait(false);
             ct.ThrowIfCancellationRequested(); held.RequireOwner(lease);
             return new(original, head, headHash.ToArray(), floor.Exact.ToArray(), previousRoute.ToArray(),
                 previousHash.ToArray(), updateBytes.ToArray(), faulted, hasConsent, inboundXur1.ToArray());
@@ -154,6 +164,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         var floor = await opened.Custody.ReconcileAsync(ct).ConfigureAwait(false);
         if (!FixedRoute(floor.Exact.Span, history.NativeFloor.Span))
             throw new CryptographicException("Native route predecessor changed during current delivery verification.");
+        using var finalSources = await ReadNativeRouteSnapshotAsync(opened, floor, own: false, held, ct).ConfigureAwait(false);
         ct.ThrowIfCancellationRequested(); held.RequireOwner(lease);
         return new(history.Original, route, route.LocatorHash.ToArray(), history.HeadEventHash, history.NativeFloor, inputs);
     }

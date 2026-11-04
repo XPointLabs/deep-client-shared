@@ -119,11 +119,11 @@ public sealed class Did2CompactionPlanTests
         using var idle = RegisteredEmpty(Network, Account, Instance);
         RootKind[] kinds = [RootKind.Ordinary, RootKind.Send, RootKind.Grant, RootKind.Read,
             RootKind.SessionCatalog, RootKind.MessagingFloor, RootKind.Attachment, RootKind.AccountRegistration,
-            RootKind.MessagingHistoryCheckpoint, RootKind.MessagingPeerBootstrap];
+            RootKind.MessagingHistoryCheckpoint, RootKind.MessagingPeerBootstrap, RootKind.MessagingArchive];
         var roots = kinds.Select((kind, index) => index == 0 ? Changed(kind, 10, 20) : Guard(kind, checked((byte)(10 + index)))).ToArray();
         using var prepared = idle.Prepare(SqlTarget.Application, Bytes(32, 8), Bytes(32, 9), BeforeSql, AfterSql,
             roots, Rows(action));
-        Assert.Equal(10, prepared.Plan.RootCount); Assert.Equal(action, prepared.Plan.ReadRow(0).Action);
+        Assert.Equal(11, prepared.Plan.RootCount); Assert.Equal(action, prepared.Plan.ReadRow(0).Action);
         Assert.Throws<InvalidDataException>(() => idle.Prepare(SqlTarget.Transport, Bytes(32, 8), Bytes(32, 9), BeforeSql, AfterSql,
             roots, Rows(action)));
         var altered = roots.ToArray(); altered[1] = Changed(RootKind.Send, 11, 21);
@@ -150,8 +150,16 @@ public sealed class Did2CompactionPlanTests
         Changed(RootKind.Ordinary, 10, 20), Changed(RootKind.Send, 11, 21), Changed(RootKind.Grant, 12, 22),
         Guard(RootKind.SessionCatalog, 13), Guard(RootKind.MessagingFloor, 14),
         Guard(RootKind.AccountRegistration, 15), Guard(RootKind.NativeFence, 16),
-        Changed(RootKind.MessagingHistoryCheckpoint, 17, 23)
+        Guard(RootKind.MessagingHistoryCheckpoint, 17), Guard(RootKind.MessagingArchive, 18)
     ];
+    private static Root[] PrefixRoots()
+    {
+        var exact = Bytes(Did2MessagingArchiveRoot.Bytes, 23);
+        return [Guard(RootKind.SessionCatalog, 13), Guard(RootKind.MessagingFloor, 14),
+            Guard(RootKind.AccountRegistration, 15), Guard(RootKind.MessagingHistoryCheckpoint, 17),
+            Guard(RootKind.MessagingPeerBootstrap, 18),
+            new(RootKind.MessagingArchive, Bytes(32, 19), Bytes(32, 6), SHA256.HashData(exact), false, exact)];
+    }
     private static Row[] Rows(Disposition action) => [new(action, Bytes(32, 30), Bytes(32, 40)), new(action, Bytes(32, 31), Bytes(32, 41))];
     private static Preparation Prepared(SqlTarget target = SqlTarget.Application)
     {
@@ -160,7 +168,7 @@ public sealed class Did2CompactionPlanTests
             target == SqlTarget.ProtectedOnly ? Disposition.ReplayScope : Disposition.OutboxPayload;
         return idle.Prepare(target, Bytes(32, 8), Bytes(32, 9),
             target == SqlTarget.ProtectedOnly ? new byte[32] : BeforeSql,
-            target == SqlTarget.ProtectedOnly ? new byte[32] : AfterSql, Roots(), Rows(action));
+            target == SqlTarget.ProtectedOnly ? new byte[32] : AfterSql, target == SqlTarget.Messaging ? PrefixRoots() : Roots(), Rows(action));
     }
     private static RootReadback[] Readbacks(Root[] roots, bool after = false) => roots.Select(root =>
         new RootReadback(root.Kind, root.Selector, after ? root.After : root.Before)).ToArray();
@@ -236,14 +244,14 @@ public sealed class Did2CompactionPlanTests
         using var preparation = Prepared(target);
         using var pending = Decode(preparation.Plan.Exact.Span, Network, Account, Instance);
         preparation.Successors.Use(bytes => pending.ValidateSuccessors(bytes));
-        var actual = Readbacks(Roots());
+        var actual = Readbacks(target == SqlTarget.Messaging ? PrefixRoots() : Roots());
         if (target != SqlTarget.ProtectedOnly)
             Assert.Equal(new RecoveryObservation(RecoveryStep.ApplySql), pending.ObserveReadback(BeforeSql, actual));
         var sql = target == SqlTarget.ProtectedOnly ? new byte[32] : AfterSql;
         Assert.Equal(new RecoveryObservation(RecoveryStep.RecordSqlCommit), pending.ObserveReadback(sql, actual));
         using var committed = pending.WithSqlCommitted();
         using var reopened = Decode(committed.Exact.Span, Network, Account, Instance);
-        var expected = Roots();
+        var expected = target == SqlTarget.Messaging ? PrefixRoots() : Roots();
         while (true)
         {
             var observed = reopened.ObserveReadback(sql, actual);
@@ -356,7 +364,7 @@ public sealed class Did2CompactionPlanTests
         roots = Roots(); roots[6] = Changed(RootKind.NativeFence, 16, 24); Reject(roots, Rows(Disposition.OutboxPayload));
         Reject(Roots().Where(root => root.Kind != RootKind.AccountRegistration).ToArray(), Rows(Disposition.OutboxPayload));
         Reject(Roots().Where(root => root.Kind != RootKind.NativeFence).ToArray(), Rows(Disposition.ReplayScope));
-        Reject(Roots().Where(root => root.Kind != RootKind.MessagingHistoryCheckpoint).ToArray(), Rows(Disposition.JournalPrefix), SqlTarget.Messaging);
+        Reject(PrefixRoots().Where(root => root.Kind != RootKind.MessagingHistoryCheckpoint).ToArray(), Rows(Disposition.JournalPrefix), SqlTarget.Messaging);
         var rows = Rows(Disposition.OutboxPayload); rows[1] = rows[0] with { Action = Disposition.Audit }; Reject(Roots(), rows);
         rows = Rows(Disposition.OutboxPayload); (rows[0], rows[1]) = (rows[1], rows[0]); Reject(Roots(), rows);
         Reject(Roots(), Rows((Disposition)5)); Reject(Roots(), Rows(Disposition.JournalPrefix));
@@ -368,8 +376,8 @@ public sealed class Did2CompactionPlanTests
     public void PeerBootstrapDependencyIsAlwaysAnUnchangedGuard(bool changed)
     {
         using var idle = RegisteredEmpty(Network, Account, Instance);
-        var roots = Roots().Append(changed ? Changed(RootKind.MessagingPeerBootstrap, 18, 25) :
-            Guard(RootKind.MessagingPeerBootstrap, 18)).ToArray();
+        var roots = PrefixRoots();
+        if (changed) roots[4] = Changed(RootKind.MessagingPeerBootstrap, 18, 25);
         if (changed) Assert.Throws<InvalidDataException>(() => idle.Prepare(SqlTarget.Messaging,
             Bytes(32, 8), Bytes(32, 9), BeforeSql, AfterSql, roots, Rows(Disposition.JournalPrefix)));
         else
@@ -384,17 +392,18 @@ public sealed class Did2CompactionPlanTests
     public void CompleteMailboxStateIsAUniqueUnchangedGuardAndChangedReadbackRejects()
     {
         using var idle = RegisteredEmpty(Network, Account, Instance);
-        var roots = Roots().Append(Guard(RootKind.MailboxStoreState, 19)).ToArray();
+        var roots = Roots().Append(Guard(RootKind.MailboxStoreState, 19)).OrderBy(root => root.Kind).ToArray();
         using var prepared = idle.Prepare(SqlTarget.ProtectedOnly, Bytes(32, 8), Bytes(32, 9),
             new byte[32], new byte[32], roots, Rows(Disposition.ReplayScope));
         var readbacks = Readbacks(roots);
         Assert.Equal(RecoveryStep.RecordSqlCommit, prepared.Plan.ObserveReadback(new byte[32], readbacks).Step);
-        readbacks[^1] = readbacks[^1] with { Digest = Bytes(32, 0x99) };
+        var mailboxIndex = Array.FindIndex(roots, root => root.Kind == RootKind.MailboxStoreState);
+        readbacks[mailboxIndex] = readbacks[mailboxIndex] with { Digest = Bytes(32, 0x99) };
         Assert.Throws<InvalidDataException>(() => prepared.Plan.ObserveReadback(new byte[32], readbacks));
-        roots[^1] = Changed(RootKind.MailboxStoreState, 19, 25);
+        roots[mailboxIndex] = Changed(RootKind.MailboxStoreState, 19, 25);
         Assert.Throws<InvalidDataException>(() => idle.Prepare(SqlTarget.ProtectedOnly, Bytes(32, 8), Bytes(32, 9),
             new byte[32], new byte[32], roots, Rows(Disposition.ReplayScope)));
-        roots[^1] = Guard(RootKind.MailboxStoreState, 19);
+        roots[mailboxIndex] = Guard(RootKind.MailboxStoreState, 19);
         Assert.Throws<InvalidDataException>(() => idle.Prepare(SqlTarget.ProtectedOnly, Bytes(32, 8), Bytes(32, 9),
             new byte[32], new byte[32], roots.Append(Guard(RootKind.MailboxStoreState, 20)).ToArray(), Rows(Disposition.ReplayScope)));
     }

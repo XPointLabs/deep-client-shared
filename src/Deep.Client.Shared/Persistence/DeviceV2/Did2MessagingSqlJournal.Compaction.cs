@@ -22,7 +22,7 @@ internal sealed partial class Did2MessagingSqlJournal
 
     internal HistoryPrefixEffects CaptureHistoryPrefixEffects(Did2MessagingFloor stable, int prefixRows)
     {
-        if (stable.Phase != 1 || stable.Status != 1 || prefixRows is < 1 or > Did2CompactionPlan.MaximumRows)
+        if (!archiveEnrollment || stable.Phase != 1 || stable.Status != 1 || prefixRows is < 1 or > Did2CompactionPlan.MaximumRows)
             throw new InvalidDataException("Compaction capture needs a bounded active exact prefix.");
         RequireCipherPolicy(); ValidateSchema();
         using var tx = connection.BeginTransaction();
@@ -59,11 +59,10 @@ internal sealed partial class Did2MessagingSqlJournal
             throw new CryptographicException("Compaction SQL is not the exact complete successor.");
     }
 
-    internal async Task ApplyStoredPrefixAsync(IDeepSecureStorage storage, Did2CompactionPlan plan,
-        Did2MessagingFloor stable, Did2MessagingHistoryCheckpoint successor,
-        HeldDeepIdV2AccountLease held, DeepIdV2AccountFileLease lease, CancellationToken ct)
+    internal void ApplyOldEnrollmentPrefix(Did2CompactionPlan plan,
+        Did2MessagingFloor stable, Did2MessagingHistoryCheckpoint successor)
     {
-        using var borrowed = held.BorrowFor(lease);
+        if (!archiveEnrollment) throw new InvalidOperationException("Only explicit old enrollment drain may advance history304.");
         if (plan.Phase != 1 || plan.Target != Did2CompactionPlan.SqlTarget.Messaging || !Fixed(plan.SqlSelector, scope.Hash))
             throw new InvalidDataException("Only an exact prepared messaging prefix can enter SQL.");
         RequireCipherPolicy(); ValidateSchema(); using var tx = connection.BeginTransaction();
@@ -77,22 +76,22 @@ internal sealed partial class Did2MessagingSqlJournal
             if (expected.Action != actual.Action || !Fixed(expected.Selector.Span, actual.Selector.Span) || !Fixed(expected.Commitment.Span, actual.Commitment.Span))
                 throw new CryptographicException("Stored prefix changed a selected row/disposition.");
         }
-        var roots = await ProtectedDeepIdV2AccountOwner.ReadPrefixRootsUnderLeaseAsync(storage, plan, scope, held, lease, ct).ConfigureAwait(false);
-        if (plan.ObserveReadback(effects.Before.Span, roots).Step != Did2CompactionPlan.RecoveryStep.ApplySql)
-            throw new InvalidDataException("Compaction predecessor changed before SQL.");
-        ct.ThrowIfCancellationRequested(); held.RequireOwner(lease);
         using (var delete = Command("DELETE FROM journal WHERE ordinal<=$prefix;", tx))
         {
             delete.Parameters.AddWithValue("$prefix", checked((long)successor.Basis.Ordinal));
             if (delete.ExecuteNonQuery() != plan.RowCount) throw new CryptographicException("Compaction changed another journal prefix.");
         }
-        var after = new Did2MessagingSqlJournal(connection, scope, successor);
+        var after = new Did2MessagingSqlJournal(connection, scope, successor) { archiveEnrollment = true };
         after.VerifyHistoryPrefix(tx); var headers = after.ReadJournal(out var tip, tx); after.VerifyRows(headers, tip, tx); RequireSame(stable, tip);
         if (!Fixed(after.CompleteSqlProjection(0, tx), plan.SqlAfter)) throw new CryptographicException("Compaction SQL effects differ before commit.");
-        roots = await ProtectedDeepIdV2AccountOwner.ReadPrefixRootsUnderLeaseAsync(storage, plan, scope, held, lease, ct).ConfigureAwait(false);
-        if (plan.ObserveReadback(plan.SqlAfter, roots).Step != Did2CompactionPlan.RecoveryStep.RecordSqlCommit)
-            throw new InvalidDataException("Compaction dependencies changed before SQL commit.");
-        ct.ThrowIfCancellationRequested(); held.RequireOwner(lease); tx.Commit();
+        tx.Commit();
+    }
+
+    internal void VerifyOldEnrollmentPrefixSuccessor(Did2MessagingFloor stable, Did2CompactionPlan plan,
+        Did2MessagingHistoryCheckpoint successor)
+    {
+        if (!archiveEnrollment) throw new InvalidOperationException("Only explicit old enrollment drain may verify history304 effects.");
+        ForArchiveEnrollment(connection, scope, successor).VerifyCompletePrefixSuccessor(stable, plan);
     }
 
     internal byte[] ReadCompleteCompactionProjection()

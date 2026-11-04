@@ -6,6 +6,143 @@ namespace Deep.Client.Shared.Persistence.DeviceV2;
 
 internal sealed partial class ProtectedDeepIdV2AccountOwner
 {
+    private sealed class QualifiedArchiveAuthored(Did2MessagingSessionScope scope) : IDisposable
+    {
+        internal readonly Dictionary<ulong, ReadOnlyMemory<byte>> Values = [];
+        internal readonly Dictionary<string, byte[]?> Roots = new(StringComparer.Ordinal);
+        internal readonly List<Did2MessagingArchiveOriginal> Originals = [];
+        internal byte[] OrdinaryExact = [], AcceptExact = [];
+        internal readonly Dictionary<ulong, byte[]> Groups = [];
+        internal IReadOnlyDictionary<ulong, ReadOnlyMemory<byte>> Events => Values;
+        internal Did2MessagingArchiveAuthoredRead PairedRead => new(Roots, connection =>
+        {
+            using var ordinary = ProtectedDid2DirectTextJournal.Decode(OrdinaryExact, scope.Network, scope.LocalAccount, scope.Instance);
+            using var accepts = ProtectedDid2ContactAcceptJournal.Decode(AcceptExact, scope.Network, scope.LocalAccount, scope.Instance);
+            foreach (var row in Originals)
+            {
+                var actual = SqliteDeepMailboxStore.ReadArchiveAuthoredOriginal(connection, scope, row, ordinary, accepts.FindScope(scope), Groups.GetValueOrDefault(row.Reference.Ordinal));
+                try { if (!Values.TryGetValue(row.Reference.Ordinal, out var expected) || !Did2MessagingSessionScope.Fixed(actual, expected.Span)) throw new CryptographicException("Final paired selected application original changed."); }
+                finally { CryptographicOperations.ZeroMemory(actual); }
+            }
+        }, Originals.Count != 0);
+        public void Dispose()
+        {
+            foreach (var bytes in Values.Values) if (System.Runtime.InteropServices.MemoryMarshal.TryGetArray(bytes, out var array)) CryptographicOperations.ZeroMemory(array.AsSpan());
+            foreach (var root in Roots.Values) if (root is not null) CryptographicOperations.ZeroMemory(root);
+            foreach (var original in Originals) original.Dispose();
+            CryptographicOperations.ZeroMemory(OrdinaryExact); CryptographicOperations.ZeroMemory(AcceptExact);
+            foreach (var bytes in Groups.Values) CryptographicOperations.ZeroMemory(bytes);
+            Values.Clear(); Roots.Clear(); Originals.Clear();
+        }
+    }
+
+    private async Task<QualifiedArchiveAuthored> QualifyArchiveAuthoredAsync(Did2MessagingSessionScope scope,
+        IReadOnlyList<Did2MessagingArchiveOriginal> originals, HeldDeepIdV2AccountLease held, CancellationToken ct)
+    {
+        held.RequireOwner(lease);
+        if (originals.Count > 71 || originals.Any(row => row.Reference.Direction != 1))
+            throw new InvalidDataException("Authored qualification requires bounded outgoing actual originals.");
+        var result = new QualifiedArchiveAuthored(scope);
+        try
+        {
+            using var actual = await storage.ReadOwnedBatchAsync(ArchiveAuthoredSlots, ct).ConfigureAwait(false);
+            ProtectedDid2DirectTextJournal.State? ordinary = null;
+            ProtectedDid2ContactAcceptJournal.State? accepts = null;
+            var groups = new Dictionary<ulong, byte[]>();
+            try
+            {
+                for (var i = 0; i < ArchiveAuthoredSlots.Length; i++)
+                {
+                    var slot = ArchiveAuthoredSlots[i]; var raw = actual[i];
+                    result.Roots[slot] = raw?.Use(bytes => SHA256.HashData(bytes));
+                    if (slot == ProtectedDid2DirectTextJournal.Slot)
+                    {
+                        ordinary = raw?.Use(bytes => ProtectedDid2DirectTextJournal.Decode(bytes, scope.Network, scope.LocalAccount, scope.Instance)) ??
+                            throw new InvalidDataException("Actual protected authored counters are absent.");
+                        result.OrdinaryExact = raw!.Use(bytes => bytes.ToArray());
+                    }
+                    else if (slot == ProtectedDid2ContactAcceptJournal.Slot)
+                    {
+                        accepts = raw?.Use(bytes => ProtectedDid2ContactAcceptJournal.Decode(bytes, scope.Network, scope.LocalAccount, scope.Instance)) ??
+                            throw new InvalidDataException("Actual protected explicit-consent custody is absent.");
+                        result.AcceptExact = raw!.Use(bytes => bytes.ToArray());
+                    }
+                    else if (raw is not null)
+                    {
+                        using var parsed = raw.Use(bytes => ProtectedDid2GroupJournal.Decode(bytes, scope.Network, scope.LocalAccount, scope.Instance));
+                        foreach (var native in originals)
+                        {
+                            var exact = RequireGroupAuthoredEvent(parsed, scope, native.Reference.Operation, native.Metadata.AsSpan(300, 32));
+                            if (exact is not null) groups.Add(native.Reference.Ordinal, exact);
+                        }
+                    }
+                    else throw new InvalidDataException("Actual protected group authored custody is absent.");
+                }
+                actual.Dispose(); // In particular, dispose every copied group key before application-key acquisition.
+                var commands = ordinary ?? throw new InvalidDataException("Authored counter custody is absent.");
+                var acceptance = accepts?.FindScope(scope);
+                if (originals.Count == 0) return result;
+                var values = await SqliteDeepIdV2AccountGeneration.ReadArchiveAuthoredSqlUnderLeaseAsync(storage, sqlStatePath,
+                    scope, held, lease, result.Roots, connection =>
+                    {
+                        var output = new Dictionary<ulong, byte[]>();
+                        try
+                        {
+                            foreach (var native in originals)
+                            {
+                                ct.ThrowIfCancellationRequested();
+                                if (output.ContainsKey(native.Reference.Ordinal)) continue;
+                                output.Add(native.Reference.Ordinal, SqliteDeepMailboxStore.ReadArchiveAuthoredOriginal(connection, scope,
+                                    native, commands, acceptance, groups.GetValueOrDefault(native.Reference.Ordinal)));
+                            }
+                            return output;
+                        }
+                        catch { foreach (var bytes in output.Values) CryptographicOperations.ZeroMemory(bytes); throw; }
+                    }, ct).ConfigureAwait(false);
+                foreach (var item in values) result.Values.Add(item.Key, item.Value);
+                foreach (var item in groups) result.Groups.Add(item.Key, item.Value.ToArray());
+                foreach (var native in originals.GroupBy(row => row.Reference.Ordinal).Select(group => group.First()))
+                    result.Originals.Add(new(native.Reference, native.Metadata.ToArray(), native.Envelope.ToArray(), native.Plaintext.ToArray()));
+                ct.ThrowIfCancellationRequested(); held.RequireOwner(lease);
+                return result;
+            }
+            finally
+            {
+                ordinary?.Dispose(); accepts?.Dispose();
+                foreach (var bytes in groups.Values) CryptographicOperations.ZeroMemory(bytes);
+            }
+        }
+        catch { result.Dispose(); throw; }
+    }
+
+    private async Task RequireArchiveAuthoredCurrentAsync(QualifiedArchiveAuthored expected,
+        Did2MessagingSessionScope scope, HeldDeepIdV2AccountLease held, CancellationToken ct)
+    {
+        using var actual = await QualifyArchiveAuthoredAsync(scope, expected.Originals, held, ct).ConfigureAwait(false);
+        if (actual.Roots.Count != expected.Roots.Count || actual.Values.Count != expected.Values.Count ||
+            expected.Roots.Any(pair => !actual.Roots.TryGetValue(pair.Key, out var value) ||
+                (pair.Value is null ? value is not null : value is null || !Did2MessagingSessionScope.Fixed(pair.Value, value))) ||
+            expected.Values.Any(pair => !actual.Values.TryGetValue(pair.Key, out var value) || !Did2MessagingSessionScope.Fixed(pair.Value.Span, value.Span)))
+            throw new CryptographicException("Authored source changed across actual native SQL callbacks.");
+    }
+
+    private async Task<Did2MessagingSqlJournal.ArchivePrefixEffects> CaptureArchivePrefixEffectsAsync(
+        OwnedDid2MessagingStorage opened, Did2MessagingFloor stable, int prefixRows,
+        HeldDeepIdV2AccountLease held, CancellationToken ct)
+    {
+        var rows = await opened.WithSqlAsync(sql => sql.ReadArchivePrefixAuthoredSources(stable, prefixRows), ct).ConfigureAwait(false);
+        try
+        {
+            using var qualified = await QualifyArchiveAuthoredAsync(opened.Scope, rows, held, ct).ConfigureAwait(false);
+            var effects = await opened.WithPairedSqlAsync(qualified.PairedRead, sql => sql.CaptureArchivePrefixEffects(stable, prefixRows, qualified.Events), ct).ConfigureAwait(false);
+            await RequireArchiveAuthoredCurrentAsync(qualified, opened.Scope, held, ct).ConfigureAwait(false);
+            var final = await opened.WithPairedSqlAsync(qualified.PairedRead, sql => sql.CaptureArchivePrefixEffects(stable, prefixRows, qualified.Events), ct).ConfigureAwait(false);
+            if (!Did2MessagingSessionScope.Fixed(effects.Before.Span, final.Before.Span) || !Did2MessagingSessionScope.Fixed(effects.After.Span, final.After.Span))
+                throw new CryptographicException("Native prefix changed across paired authored-source readback.");
+            return final;
+        }
+        finally { foreach (var row in rows) row.Dispose(); }
+    }
     private static readonly string[] ArchiveAuthoredSlots =
         [ProtectedDid2ContactAcceptJournal.Slot, ProtectedDid2DirectTextJournal.Slot, ProtectedDid2GroupJournal.Slot];
 
@@ -55,8 +192,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             var owned = actual[i];
             if (owned is null)
             {
-                if (slot == ProtectedDid2DirectTextJournal.Slot) throw new InvalidDataException("The actual protected authored counter root is absent.");
-                target.AppendData([0]); frames.AppendData([0]); continue;
+                throw new InvalidDataException("An actual mandatory protected authored root is absent.");
             }
             owned.Use(raw =>
             {

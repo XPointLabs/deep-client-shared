@@ -50,11 +50,27 @@ internal static partial class SqliteDeepIdV2AccountGeneration
             File.Delete(artifact);
     }
 
-    internal static async Task EnsureAsync(string statePath,
+    internal static Task EnsureAsync(string statePath,
         IDeepSecureStorage storage, ReadOnlyMemory<byte> networkId,
         ReadOnlyMemory<byte> accountId, string displayName,
         VerifiedDeepIdV2LocalGenesis genesis, bool allowCreate,
         CancellationToken cancellationToken, AccountRegistrationGrammar? grammar = null)
+        => EnsureCoreAsync(statePath, storage, networkId, accountId, displayName, genesis, allowCreate,
+            cancellationToken, grammar, AccountAdmission.Ordinary);
+
+    internal static Task EnsureForArchiveEnrollmentAsync(string statePath, IDeepSecureStorage storage,
+        ReadOnlyMemory<byte> networkId, ReadOnlyMemory<byte> accountId, string displayName,
+        VerifiedDeepIdV2LocalGenesis genesis, CancellationToken ct, AccountRegistrationGrammar? grammar = null)
+        => EnsureCoreAsync(statePath, storage, networkId, accountId, displayName, genesis, false,
+            ct, grammar, AccountAdmission.ExplicitArchiveEnrollment);
+
+    private enum AccountAdmission { Ordinary, ExplicitArchiveEnrollment }
+
+    private static async Task EnsureCoreAsync(string statePath,
+        IDeepSecureStorage storage, ReadOnlyMemory<byte> networkId,
+        ReadOnlyMemory<byte> accountId, string displayName,
+        VerifiedDeepIdV2LocalGenesis genesis, bool allowCreate,
+        CancellationToken cancellationToken, AccountRegistrationGrammar? grammar, AccountAdmission admission)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(statePath);
         ArgumentNullException.ThrowIfNull(storage);
@@ -95,10 +111,11 @@ internal static partial class SqliteDeepIdV2AccountGeneration
              ProtectedContactRendezvousJournal.Slot, ResponderInitialSessionCheckpoint.Slot,
              Did2CompactionPlan.Slot, ProtectedDid2MessagingSessionCatalog.Slot,
              "deep.store.v2.current-account", KeySlot,
-             ProtectedInitialKeyRetirementJournal.Slot, ProtectedDid2GroupJournal.Slot];
+             ProtectedInitialKeyRetirementJournal.Slot, ProtectedDid2GroupJournal.Slot,
+             ProtectedDid2MessagingArchiveEnrollment.Slot];
         using var captured = await storage.ReadOwnedBatchAsync(registrationSlots,
             cancellationToken).ConfigureAwait(false);
-        if (captured.Count != 18) throw new InvalidDataException("Protected registration read group has another shape.");
+        if (captured.Count != 19) throw new InvalidDataException("Protected registration read group has another shape.");
         using var published = captured[14];
         if (allowCreate && published is not null)
             throw new InvalidOperationException(
@@ -188,15 +205,32 @@ internal static partial class SqliteDeepIdV2AccountGeneration
                 ? await storage.ReadOwnedBatchAsync(registrationSlots, cancellationToken).ConfigureAwait(false)
                 : null;
             var journals = createdRegistrations ?? captured;
-            if (journals.Count != 18) throw new InvalidDataException("Protected registration read group has another shape.");
+            if (journals.Count != 19) throw new InvalidDataException("Protected registration read group has another shape.");
+            var enrollment = admission == AccountAdmission.ExplicitArchiveEnrollment;
+            if (!enrollment && journals[18] is not null)
+                throw new InvalidOperationException("Explicit messaging archive enrollment owns ordinary account admission.");
+            using var rawMessaging = journals[13] ??
+                throw new InvalidDataException("The protected DID2 messaging catalog is absent; explicit reset is required.");
+            using var messaging = rawMessaging.Use(bytes => enrollment ?
+                ProtectedDid2MessagingSessionCatalog.DecodeForEnrollment(bytes, networkId.Span, accountId.Span, record.AsSpan(56, 32)) :
+                ProtectedDid2MessagingSessionCatalog.Decode(bytes, networkId.Span, accountId.Span, record.AsSpan(56, 32)));
+            if (journals[18] is { } rawEnrollment)
+            {
+                if (messaging.Version != 2) throw new CryptographicException("An old catalog cannot own indexed enrollment progress.");
+                var selected = Enumerable.Range(0, messaging.Count).FirstOrDefault(index => rawEnrollment.Use(bytes =>
+                    bytes.Length == ProtectedDid2MessagingArchiveEnrollment.Bytes && Fixed(bytes.Slice(16, 32), messaging.Scope(index).Hash)), -1);
+                if (selected < 0) throw new CryptographicException("Enrollment progress does not resolve its actual catalog entry.");
+                _ = rawEnrollment.Use(bytes => ProtectedDid2MessagingArchiveEnrollment.Decode(bytes, messaging.Scope(selected)));
+            }
             using var rawGroups = journals[17] ?? throw new InvalidDataException("Protected group registration is absent; explicit reset is required.");
             grammar ??= new AccountRegistrationGrammar();
             rawGroups.Use(bytes => { grammar.Validate(RegistrationGrammarKind.Group, bytes, networkId.Span, accountId.Span, record.AsSpan(56, 32)); return true; });
             using var rawCompaction = journals[12] ??
                 throw new InvalidDataException("Protected compaction registration is absent; explicit reset is required.");
-            using var compaction = rawCompaction.Use(bytes => Did2CompactionPlan.Decode(
-                bytes, networkId.Span, accountId.Span, record.AsSpan(56, 32)));
-            if (compaction.Phase != 0)
+            using var compaction = rawCompaction.Use(bytes => enrollment && messaging.Version == 1 ?
+                Did2CompactionPlan.DecodeForOldEnrollment(bytes, networkId.Span, accountId.Span, record.AsSpan(56, 32)) :
+                Did2CompactionPlan.Decode(bytes, networkId.Span, accountId.Span, record.AsSpan(56, 32)));
+            if (compaction.Phase != 0 && (!enrollment || messaging.Version != 1 && (!messaging.AllIndexed || journals[18] is not null)))
                 throw new InvalidDataException("An active compaction plan owns recovery; ordinary account reopen cannot bypass it.");
             // Every original decoder still validates its exact captured slot.
             using var application = journals[0] ?? throw new InvalidDataException(
@@ -234,10 +268,6 @@ internal static partial class SqliteDeepIdV2AccountGeneration
                     "The protected initial receiver checkpoint is absent; explicit local reset is required.");
             using var receiverState = receiver.Use(value => ResponderInitialSessionCheckpoint.Decode(value,
                 instanceForClaims, accountId.Span, networkId.Span));
-            using var rawMessaging = journals[13] ??
-                throw new InvalidDataException("The protected DID2 messaging catalog is absent; explicit reset is required.");
-            using var messaging = rawMessaging.Use(bytes => ProtectedDid2MessagingSessionCatalog.Decode(
-                bytes, networkId.Span, accountId.Span, instanceForClaims));
             using var rawRetirements = journals[16] ??
                 throw new InvalidDataException("Protected initial-key retirement journal is missing; explicit reset is required.");
             var retirements = rawRetirements.Use(bytes => ProtectedInitialKeyRetirementJournal.Decode(

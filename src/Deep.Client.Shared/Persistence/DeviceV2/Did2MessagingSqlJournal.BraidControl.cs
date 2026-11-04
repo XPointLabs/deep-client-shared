@@ -64,19 +64,8 @@ internal sealed partial class Did2MessagingSqlJournal
     {
         if (braidEpoch == 0 || braidEpoch == ulong.MaxValue)
             throw new InvalidDataException("Braid purpose has an invalid epoch.");
-        var progressed = false;
-        // Do not return early: consuming the complete owned enumeration also
-        // verifies its final tip. These are actual authenticated direction2
-        // native events, including independently protected compacted history.
-        foreach (var received in ReadVerifiedIncomingEvents(stable, ct))
-        {
-            var data = Dpe2Codec.Decode(received.ExactEnvelope);
-            if (!Fixed(data.NetworkId.Span, scope.Network) || !Fixed(data.SessionId.Span, scope.Session) ||
-                !Fixed(data.SenderDeviceId.Span, scope.RemoteDevice) || !Fixed(data.RecipientDeviceId.Span, scope.LocalDevice))
-                throw new CryptographicException("Peer progress lost its native session/direction.");
-            if (data.RatchetHeader.SckaSendingEpoch >= braidEpoch) progressed = true;
-        }
-        return progressed;
+        ct.ThrowIfCancellationRequested();
+        return ReadVerifiedMaximumPeerEpoch(stable) >= braidEpoch;
     }
 
     internal OwnedDid2BraidControlPersistedEvent? ReadVerifiedBraidControl(Did2MessagingFloor stable, ReadOnlySpan<byte> operation)

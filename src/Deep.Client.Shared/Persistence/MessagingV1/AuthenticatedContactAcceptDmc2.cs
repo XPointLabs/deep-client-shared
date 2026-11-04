@@ -55,7 +55,12 @@ internal sealed class AuthenticatedContactAcceptDmc2 : IAuthenticatedDmc2InboxEv
             held.RequireActive();
             var scope = opened.Scope;
             var floor = await opened.Custody.ReconcileAsync(ct).ConfigureAwait(false);
-            using var retained = opened.Sql.ReadVerifiedOperation(floor, op) ??
+            using var retained = await opened.WithSqlAsync(sql =>
+            {
+                if (!Fixed(sql.ReadOpenedFloor().Exact.Span, floor.Exact.Span))
+                    throw new CryptographicException("ContactAccept protected floor changed before fresh native read.");
+                return sql.ReadVerifiedOperation(floor, op);
+            }, ct).ConfigureAwait(false) ??
                 throw new CryptographicException("ContactAccept has no actual committed DPE2 event.");
             if (retained.Direction != (scope.IsInitiator ? 2 : 1))
                 throw new CryptographicException("ContactAccept has the wrong authenticated directional role.");
@@ -91,7 +96,12 @@ internal sealed class AuthenticatedContactAcceptDmc2 : IAuthenticatedDmc2InboxEv
             var confirmedFloor = await opened.Custody.ReconcileAsync(ct).ConfigureAwait(false);
             if (!Fixed(floor.Exact.Span, confirmedFloor.Exact.Span))
                 throw new CryptographicException("ContactAccept source changed during semantic verification.");
-            using var confirmed = opened.Sql.ReadVerifiedOperation(confirmedFloor, op) ??
+            using var confirmed = await opened.WithSqlAsync(sql =>
+            {
+                if (!Fixed(sql.ReadOpenedFloor().Exact.Span, confirmedFloor.Exact.Span))
+                    throw new CryptographicException("ContactAccept protected floor changed before final native read.");
+                return sql.ReadVerifiedOperation(confirmedFloor, op);
+            }, ct).ConfigureAwait(false) ??
                 throw new CryptographicException("ContactAccept lost its actual native commit during verification.");
             if (confirmed.Direction != retained.Direction || !Fixed(confirmed.EventHash, SHA256.HashData(accepted)))
                 throw new CryptographicException("ContactAccept changed its committed event during verification.");

@@ -26,6 +26,7 @@ internal sealed partial class Did2MessagingSqlJournal
 
     internal Did2MessagingArchiveReducer ReadEnrollmentReducer(ProtectedDid2MessagingArchiveEnrollment progress)
     {
+        RequireOpenedEnrollmentProgress(progress);
         using var query = Command("SELECT hash,exact,typeof(hash),length(hash),typeof(exact),length(exact) FROM archive_reducers WHERE hash=$hash;");
         query.Parameters.AddWithValue("$hash", progress.ReducerHash.ToArray()); using var row = query.ExecuteReader();
         if (!row.Read() || row.GetString(2) != "blob" || row.GetInt64(3) != 32 || row.GetString(4) != "blob" || row.GetInt64(5) != 960 ||
@@ -75,6 +76,7 @@ internal sealed partial class Did2MessagingSqlJournal
             ProtectedDid2MessagingArchiveEnrollment.PhaseKind.Building) || references.Count is < 1 or > 32)
             throw new InvalidOperationException("Enrollment insertion needs exact protected staging and a bounded source batch.");
         ValidateSchemaVersion(6); RequireCipherPolicy();
+        RequireStagedArchiveProgress(progress);
         var before = ReadEnrollmentReducer(progress);
         var initial = progress.TargetBasis.Ordinal == 0 ? (Metadata: Array.Empty<byte>(), Hello: Array.Empty<byte>()) : ReadArchiveInitialSource();
         var selected = new List<Did2MessagingArchiveOriginal>();

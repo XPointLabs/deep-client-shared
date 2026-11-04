@@ -35,7 +35,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             RequireRetainedStoreOwnScope(scope, own);
             using var opened = await OpenLocalHistoryUnderLeaseAsync(current, scope, held, ct).ConfigureAwait(false);
             var floor = await opened.Custody.ReconcileAsync(ct).ConfigureAwait(false);
-            using var native = RequireOwnedBraidSend(opened, scope, floor, op);
+            using var native = await RequireOwnedBraidSendAsync(opened, scope, floor, op, ct).ConfigureAwait(false);
             var before = await CaptureCompletedContactSendGuardsUnderLeaseAsync(current, held, ct).ConfigureAwait(false);
             if (await TryReadRetainedBraidStoreUnderLeaseAsync(current, held, opened, scope, op, own, source, ct).ConfigureAwait(false) is null)
                 throw new IOException("Unknown control Store pins its original transport commitments.");

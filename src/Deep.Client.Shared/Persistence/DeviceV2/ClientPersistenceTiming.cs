@@ -4,14 +4,17 @@ using System.Diagnostics.Tracing;
 namespace Deep.Client.Shared.Persistence;
 
 // Optional resource timing only. No slot, path, SQL, identity, state or payload
-// can enter this closed event; observers cannot alter the storage result.
+// can enter this closed event. Helpers only accumulate fixed numeric facts;
+// they never dispatch an observer while SQL, keys or source loans are live.
 internal enum ClientPersistencePhase { StorageLoad = 1, GroupDecode, ApplicationOpen, ApplicationIntegrity, DeviceValidate, NativeReconcile, NativeVerify }
 
 [EventSource(Name = "Deep-Client-Persistence")]
 internal sealed class ClientPersistenceTiming : EventSource
 {
-    private static readonly ClientPersistenceTiming Log = new();
-    internal static Measurement Measure(ClientPersistencePhase phase) => new(Log.IsEnabled() ? Stopwatch.GetTimestamp() : 0, phase);
+    // EventSource construction itself can dispatch OnEventSourceCreated. Delay
+    // it until the same outer, disposed boundary as event publication.
+    private static readonly Lazy<ClientPersistenceTiming> Log = new(static () => new ClientPersistenceTiming());
+    internal static Measurement Measure(ClientPersistencePhase phase) => new(Stopwatch.GetTimestamp(), phase);
 
     [Event(1, Level = EventLevel.Informational)]
     public void Completed(int phase, double milliseconds) => WriteEvent(1, phase, milliseconds);
@@ -26,8 +29,13 @@ internal sealed class ClientPersistenceTiming : EventSource
     [NonEvent]
     internal static void PublishNativeCounts(DeviceV2.Did2MessagingSqlJournal.NativeWork.Counts counts)
     {
-        if (!Log.IsEnabled()) return;
-        try { Log.NativeCounts(counts.Opens, counts.CipherScans, counts.MetadataRows, counts.SuffixRows, counts.Payloads,
+        var log = Log.Value;
+        if (!log.IsEnabled()) return;
+        try
+        {
+            for (var phase = 1; phase < counts.Timings.Length; phase++)
+                if (counts.Timings[phase] != 0) log.Completed(phase, counts.Timings[phase]);
+            log.NativeCounts(counts.Opens, counts.CipherScans, counts.MetadataRows, counts.SuffixRows, counts.Payloads,
             counts.Audits, counts.MaintenanceBatches, checked((long)counts.WorkingCount), checked((long)counts.ArchiveCount)); }
         catch { /* Observation cannot replace the operation result. */ }
     }
@@ -37,7 +45,10 @@ internal sealed class ClientPersistenceTiming : EventSource
         public void Dispose()
         {
             if (started == 0) return;
-            try { Log.Completed((int)phase, Stopwatch.GetElapsedTime(started).TotalMilliseconds); }
+            // The existing outer account operation publishes aggregates only
+            // after all private SQL/state/lease disposal. Standalone helpers
+            // omit this optional observation when no outer scope is recording.
+            try { DeviceV2.Did2MessagingSqlJournal.NativeWork.Timing(phase, Stopwatch.GetElapsedTime(started).TotalMilliseconds); }
             catch { /* Optional observations never replace the original outcome. */ }
         }
     }

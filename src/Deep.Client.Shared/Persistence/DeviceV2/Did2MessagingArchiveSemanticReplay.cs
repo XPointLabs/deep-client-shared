@@ -12,18 +12,27 @@ namespace Deep.Client.Shared.Persistence.DeviceV2;
 // every external edge. Selected consumers still verify actual originals on use.
 internal sealed class Did2MessagingArchiveSemanticReplay
 {
+    internal delegate void ObserveFact(Did2MessagingArchiveFamily family, ReadOnlySpan<byte> selector, ReadOnlySpan<byte> value);
+    internal delegate byte[]? ReadFact(Did2MessagingArchiveFamily family, ReadOnlySpan<byte> selector);
     private readonly Did2MessagingSessionScope scope;
-    private readonly Did2MessagingArchiveBuilder builder;
+    private readonly ObserveFact observe;
+    private readonly ReadFact read;
     private readonly Func<Did2MessagingArchiveReference, ReadOnlyMemory<byte>> original;
     private readonly byte[] reducer, helloHash;
-    private readonly Dictionary<ulong, ReadOnlyMemory<byte>> observed = [];
+    private readonly ReadOnlyMemory<byte> initialHello;
 
     internal Did2MessagingArchiveSemanticReplay(Did2MessagingSessionScope scope, Did2MessagingFloor target,
         Did2MessagingArchiveReducer before, Did2MessagingArchiveBuilder builder,
         ReadOnlySpan<byte> initialMetadata, ReadOnlyMemory<byte> exactHello,
         Func<Did2MessagingArchiveReference, ReadOnlyMemory<byte>> original)
+        : this(scope, target, before, builder.Add, builder.Read, initialMetadata, exactHello, original) { }
+
+    internal Did2MessagingArchiveSemanticReplay(Did2MessagingSessionScope scope, Did2MessagingFloor target,
+        Did2MessagingArchiveReducer before, ObserveFact observe, ReadFact read,
+        ReadOnlySpan<byte> initialMetadata, ReadOnlyMemory<byte> exactHello,
+        Func<Did2MessagingArchiveReference, ReadOnlyMemory<byte>> original)
     {
-        this.scope = scope; this.builder = builder; this.original = original;
+        this.scope = scope; this.observe = observe; this.read = read; this.original = original; initialHello = exactHello;
         if (target.Ordinal < before.Basis.Ordinal) throw Bad();
         reducer = before.Exact.ToArray(); target.Exact.Span.CopyTo(reducer.AsSpan(36));
         helloHash = SHA256.HashData(exactHello.Span);
@@ -45,7 +54,6 @@ internal sealed class Did2MessagingArchiveSemanticReplay
             if (!scope.IsInitiator) QualifiedPeer(reference, greeting.MailboxRoute.Route.ExactBytes.Span, 0, new byte[32], 2);
         }
         else if (!Fixed(before.InitialMetadataHash, metadataHash)) throw Bad();
-        observed.Add(1, exactHello);
         _ = Did2MessagingArchiveReducer.Decode(reducer, scope);
     }
 
@@ -53,9 +61,9 @@ internal sealed class Did2MessagingArchiveSemanticReplay
     {
         var reference = native.Reference;
         if (reference.Kind != 2 || !Fixed(reference.MetadataHash, SHA256.HashData(native.Metadata))) throw Bad();
-        builder.Add(Did2MessagingArchiveFamily.Operation, reference.Operation, reference.Exact.Span);
+        observe(Did2MessagingArchiveFamily.Operation, reference.Operation, reference.Exact.Span);
         Span<byte> number = stackalloc byte[8]; BinaryPrimitives.WriteUInt64BigEndian(number, reference.Ordinal);
-        builder.Add(Did2MessagingArchiveFamily.Ordinal, number, reference.Exact.Span);
+        observe(Did2MessagingArchiveFamily.Ordinal, number, reference.Exact.Span);
         if (reference.Direction is 3 or 4) return;
         var exact = reference.Direction == 2 ? (ReadOnlyMemory<byte>)native.Plaintext : exactAuthored;
         if (exact.IsEmpty || !Fixed(SHA256.HashData(exact.Span), native.Metadata.AsSpan(300, 32))) throw Bad();
@@ -65,17 +73,16 @@ internal sealed class Did2MessagingArchiveSemanticReplay
             if (!Fixed(message.NetworkId.Span, scope.Network) || !Fixed(message.ConversationId.Span, scope.Conversation) ||
                 !Fixed(message.SenderAccountId.Span, reference.Direction == 1 ? scope.LocalAccount : scope.RemoteAccount) ||
                 !Fixed(message.SenderDeviceId.Span, reference.Direction == 1 ? scope.LocalDevice : scope.RemoteDevice)) throw Bad();
-            observed[reference.Ordinal] = exact;
             if (reference.Direction == 2)
             {
-                builder.Add(Did2MessagingArchiveFamily.FirstIncomingEvent, native.Metadata.AsSpan(300, 32), reference.Exact.Span);
+                observe(Did2MessagingArchiveFamily.FirstIncomingEvent, native.Metadata.AsSpan(300, 32), reference.Exact.Span);
                 var position = new byte[40]; scope.Conversation.CopyTo(position);
                 BinaryPrimitives.WriteUInt64BigEndian(position.AsSpan(32), message.SenderClientSequence);
                 var value = new byte[240]; reference.Exact.Span.CopyTo(value); native.Metadata.AsSpan(300, 32).CopyTo(value.AsSpan(88));
-                builder.Add(Did2MessagingArchiveFamily.PeerAuthoredPosition, position, value);
+                observe(Did2MessagingArchiveFamily.PeerAuthoredPosition, position, value);
                 var attachment = new byte[64]; message.LogicalMessageId.Span.CopyTo(attachment); message.SenderDeviceId.Span.CopyTo(attachment.AsSpan(32));
                 value = new byte[176]; reference.Exact.Span.CopyTo(value);
-                builder.Add(Did2MessagingArchiveFamily.IncomingAttachment, attachment, value);
+                observe(Did2MessagingArchiveFamily.IncomingAttachment, attachment, value);
                 var envelope = Dpe2Codec.Decode(native.Envelope);
                 if (envelope.RatchetHeader.SckaSendingEpoch > U64(872) || Get(Did2MessagingArchiveReducer.ReferenceKind.MaximumPeerEpoch).IsAbsent)
                 { Set(Did2MessagingArchiveReducer.ReferenceKind.MaximumPeerEpoch, reference); SetU64(872, envelope.RatchetHeader.SckaSendingEpoch); }
@@ -138,7 +145,7 @@ internal sealed class Did2MessagingArchiveSemanticReplay
             var generation = BinaryPrimitives.ReadUInt64BigEndian(route.Reachability.Field(3).Span);
             if (!own && update.RouteGeneration <= generation)
             {
-                var first = builder.Read(Did2MessagingArchiveFamily.FirstIncomingEvent, native.Metadata.AsSpan(300, 32));
+                var first = read(Did2MessagingArchiveFamily.FirstIncomingEvent, native.Metadata.AsSpan(300, 32));
                 if (first is not null && Did2MessagingArchiveReference.Decode(first, false).Ordinal < reference.Ordinal) return;
                 throw Bad();
             }
@@ -158,10 +165,10 @@ internal sealed class Did2MessagingArchiveSemanticReplay
         var value = new byte[136]; reference.Exact.Span.CopyTo(value);
         BinaryPrimitives.WriteUInt64BigEndian(value.AsSpan(88), consentOrdinal); predecessorHash.CopyTo(value.AsSpan(96));
         BinaryPrimitives.WriteUInt64BigEndian(value.AsSpan(128), sequence);
-        builder.Add(Did2MessagingArchiveFamily.QualifiedPeerRoute, SHA256.HashData(closure), value);
+        observe(Did2MessagingArchiveFamily.QualifiedPeerRoute, SHA256.HashData(closure), value);
     }
     internal Did2MessagingArchiveReducer Complete() => Did2MessagingArchiveReducer.Decode(reducer, scope);
-    private ReadOnlyMemory<byte> Source(Did2MessagingArchiveReference reference) => observed.TryGetValue(reference.Ordinal, out var exact) ? exact : original(reference);
+    private ReadOnlyMemory<byte> Source(Did2MessagingArchiveReference reference) => reference.Kind == 1 ? initialHello : original(reference);
     private Did2MessagingArchiveReference Get(Did2MessagingArchiveReducer.ReferenceKind kind) => Did2MessagingArchiveReference.Decode(reducer.AsSpan(256 + (int)kind * 88, 88));
     private void Set(Did2MessagingArchiveReducer.ReferenceKind kind, Did2MessagingArchiveReference reference) => reference.Exact.Span.CopyTo(reducer.AsSpan(256 + (int)kind * 88));
     private void SetSequence(bool own, ulong value) => SetU64(own ? 880 : 888, value);

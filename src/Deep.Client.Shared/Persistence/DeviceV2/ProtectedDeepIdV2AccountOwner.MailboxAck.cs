@@ -220,7 +220,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                     OwnedInitialMessagingSeed.RequireFreshScope(controlScope, endpoint.Pair.Own.Proof, endpoint.Pair.Peer, reading);
                     using var controlStorage = await OpenNativeMessagingUnderLeaseAsync(current, controlScope, held, ct).ConfigureAwait(false);
                     var controlFloor = await controlStorage.Custody.ReconcileAsync(ct).ConfigureAwait(false);
-                    if (ClassifyBraidMailboxCustodyUnderLease(controlStorage, controlScope, controlFloor, control, held, ct) == BraidMailboxCustody.NotCommitted)
+                    if (await ClassifyBraidMailboxCustodyUnderLeaseAsync(controlStorage, controlScope, controlFloor, control, held, ct).ConfigureAwait(false) == BraidMailboxCustody.NotCommitted)
                         throw new CryptographicException("Braid tombstone has neither authenticated receive nor obsolete-purpose custody.");
                     await RequireFinalMessagingFreshnessAsync(current, controlScope, endpoint.Pair.Own, endpoint.Pair.Peer, source, held, reading, ct).ConfigureAwait(false);
                     continue; // No DMC2 materialization, receipt obligation or AppAck for controls.
@@ -263,7 +263,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                     application ??= await SqliteDeepIdV2AccountGeneration.OpenApplicationUnderLeaseAsync(storage, sqlStatePath, current, held, ct).ConfigureAwait(false);
                     if (parsed.ContentKind is Dmc2ContentKind.MessageCreate or Dmc2ContentKind.AttachmentOffer)
                     {
-                        using var handoff = AuthenticatedDirectDmc2.FromOwnedDid2Commit(opened, stable, incoming.OperationId.Span, []);
+                        using var handoff = await AuthenticatedDirectDmc2.FromOwnedDid2CommitAsync(opened, stable, incoming.OperationId, ReadOnlyMemory<byte>.Empty, ct).ConfigureAwait(false);
                         RequireApplicationDisposition(await application.MaterializeDirectDmc2Async(handoff, ct).ConfigureAwait(false));
                     }
                     else if (parsed.ContentKind == Dmc2ContentKind.ContactAccept)

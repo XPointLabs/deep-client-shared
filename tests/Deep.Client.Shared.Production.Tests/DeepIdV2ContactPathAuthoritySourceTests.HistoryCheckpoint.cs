@@ -31,41 +31,35 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         using (var received = await fixture.ReceiveOwnedMessage(sender, ciphertext)) { }
         var before = await fixture.ReadMessagingFloor(sender);
         using var selected = await fixture.PrepareSenderCompaction(sender, checked((int)before.Ordinal));
-        Assert.Equal(1, selected.Plan.Phase); Assert.Equal(5, selected.Plan.RootCount);
+        Assert.Equal(1, selected.Plan.Phase); Assert.Equal(6, selected.Plan.RootCount);
         Assert.Equal(checked((int)before.Ordinal), selected.Plan.RowCount);
         selected.Successors.Use(bytes => selected.Plan.ValidateSuccessors(bytes));
         await fixture.WithSenderHistoryStorage(sender, async (reference, secure, observer, held) =>
         {
-            var original = await Did2MessagingHistoryCheckpoint.ReadRegisteredAsync(secure, sender, default);
+            var history = await Did2MessagingHistoryCheckpoint.ReadRegisteredAsync(secure, sender, default);
+            var original = await Did2MessagingArchiveRoot.ReadRegisteredAsync(secure, sender, default);
             Assert.Equal(0UL, original.Basis.Ordinal);
-            var candidate = reference.CaptureHistoryPrefix(before, checked((int)before.Ordinal));
-            var effects = reference.CaptureHistoryPrefixEffects(before, checked((int)before.Ordinal));
-            Assert.Equal(candidate.Exact.ToArray(), effects.Successor.Exact.ToArray());
-            Assert.Equal(effects.Before.ToArray(), reference.ReadCompleteCompactionProjection());
+            var effects = reference.CaptureArchivePrefixEffects(before, checked((int)before.Ordinal), new Dictionary<ulong, ReadOnlyMemory<byte>>());
+            var candidate = effects.Successor;
+            Assert.Equal(history.Exact.ToArray(), candidate.Source.Exact.ToArray());
             Assert.Equal(effects.Before.ToArray(), selected.Plan.Exact.Slice(160, 32).ToArray());
             Assert.Equal(effects.After.ToArray(), selected.Plan.Exact.Slice(192, 32).ToArray());
-            using (var selectedHistory = selected.Successors.Use(bytes => selected.Plan.OwnSuccessor(3, bytes)))
+            using (var selectedHistory = selected.Successors.Use(bytes => selected.Plan.OwnSuccessor(5, bytes)))
                 Assert.Equal(candidate.Exact.ToArray(), selectedHistory.Use(bytes => bytes.ToArray()));
-            Assert.Throws<InvalidDataException>(() => reference.CaptureHistoryPrefixEffects(before, 0));
-            Assert.Throws<InvalidDataException>(() => reference.CaptureHistoryPrefixEffects(before, 33));
-            Assert.Throws<InvalidDataException>(() => reference.CaptureHistoryPrefixEffects(before, checked((int)before.Ordinal + 1)));
+            Assert.Throws<InvalidDataException>(() => reference.CaptureArchivePrefixEffects(before, 0, new Dictionary<ulong, ReadOnlyMemory<byte>>()));
+            Assert.Throws<InvalidDataException>(() => reference.CaptureArchivePrefixEffects(before, 33, new Dictionary<ulong, ReadOnlyMemory<byte>>()));
+            Assert.Throws<InvalidDataException>(() => reference.CaptureArchivePrefixEffects(before, checked((int)before.Ordinal + 1), new Dictionary<ulong, ReadOnlyMemory<byte>>()));
             Assert.Equal(before.Exact.ToArray(), candidate.Basis.Exact.ToArray());
-            Assert.Equal(1UL, candidate.HistoryCount); Assert.Equal(2UL, candidate.Revision);
+            Assert.Equal(1UL, candidate.ArchiveCount); Assert.Equal(2UL, candidate.Revision);
             using var ratchet = reference.ReadVerifiedLatest(before);
             var ratchetHash = ratchet.Use(bytes => SHA256.HashData(bytes));
-            using (var trim = observer.CreateCommand())
-            {
-                trim.CommandText = "DELETE FROM journal WHERE ordinal<=$prefix;";
-                trim.Parameters.AddWithValue("$prefix", checked((long)candidate.Basis.Ordinal));
-                Assert.Equal(checked((int)before.Ordinal), trim.ExecuteNonQuery());
-            }
-            Assert.Equal(effects.After.ToArray(), reference.ReadCompleteCompactionProjection());
-            // The SQL outcome cannot be consumed with the old/SQL-only basis.
-            Assert.Throws<CryptographicException>(() => reference.VerifyTip());
+            reference.ApplyArchivePrefix(selected.Plan, before, candidate, new Dictionary<ulong, ReadOnlyMemory<byte>>());
+            Assert.Equal(effects.After.ToArray(), reference.ReadArchivePrefixProjection(before, selected.Plan, candidate, new Dictionary<ulong, ReadOnlyMemory<byte>>()));
+            Assert.Throws<CryptographicException>(() => reference.RequireArchiveMirror());
             held.RequireActive();
-            Assert.True(await secure.CompareExchangeAsync(Did2MessagingHistoryCheckpoint.Slot(sender), original.Exact, candidate.Exact));
-            var after = new Did2MessagingSqlJournal(observer, sender,
-                await Did2MessagingHistoryCheckpoint.ReadRegisteredAsync(secure, sender, default));
+            Assert.True(await secure.CompareExchangeAsync(Did2MessagingArchiveRoot.Slot(sender), original.Exact, candidate.Exact));
+            var after = Did2MessagingSqlJournal.ForOrdinaryRuntime(observer, sender, history,
+                await Did2MessagingArchiveRoot.ReadRegisteredAsync(secure, sender, default));
             Assert.Equal(before.Exact.ToArray(), after.VerifyTip().Exact.ToArray());
             using var latest = after.ReadVerifiedLatest(before); Assert.Equal(ratchetHash, latest.Use(bytes => SHA256.HashData(bytes)));
             using var retained = after.ReadVerifiedReceiveForEvent(before, SHA256.HashData(acceptance)); Assert.NotNull(retained);
@@ -99,26 +93,27 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             Assert.Equal(init.CanonicalBytes.ToArray(), retainedInitial.SessionInit); Assert.Equal(hello.CanonicalBytes.ToArray(), retainedInitial.Hello);
             CryptographicOperations.ZeroMemory(retainedInitial.SessionInit); CryptographicOperations.ZeroMemory(retainedInitial.Hello);
             // Rollback of the mandatory protected root does not rehydrate SQL.
-            Assert.True(await secure.CompareExchangeAsync(Did2MessagingHistoryCheckpoint.Slot(sender), candidate.Exact, original.Exact));
-            Assert.Throws<CryptographicException>(() => new Did2MessagingSqlJournal(observer, sender,
-                Did2MessagingHistoryCheckpoint.RegisteredEmpty(sender)).VerifyTip());
-            Assert.True(await secure.CompareExchangeAsync(Did2MessagingHistoryCheckpoint.Slot(sender), original.Exact, candidate.Exact));
+            Assert.True(await secure.CompareExchangeAsync(Did2MessagingArchiveRoot.Slot(sender), candidate.Exact, original.Exact));
+            Assert.Throws<CryptographicException>(() => Did2MessagingSqlJournal.ForOrdinaryRuntime(observer, sender,
+                history, original).VerifyOrdinaryState());
+            Assert.True(await secure.CompareExchangeAsync(Did2MessagingArchiveRoot.Slot(sender), original.Exact, candidate.Exact));
             // A payload substitution keeps SQL shape/count, but cannot preserve
             // the authenticated retained-prefix commitment.
             using (var corrupt = observer.CreateCommand())
             { corrupt.CommandText = "UPDATE events SET plaintext=zeroblob(length(plaintext)) WHERE direction=2;"; Assert.Equal(1, corrupt.ExecuteNonQuery()); }
-            Assert.ThrowsAny<Exception>(() => after.VerifyTip());
+            Assert.ThrowsAny<Exception>(() => after.VerifyCompleteArchiveTree(candidate));
             Assert.ThrowsAny<Exception>(() => after.ReadVerifiedIncomingEvents(before, default).GetEnumerator().MoveNext());
-            Assert.NotEqual(effects.After.ToArray(), after.ReadCompleteCompactionProjection());
+            Assert.ThrowsAny<Exception>(() => after.ReadArchivePrefixProjection(before, selected.Plan, candidate, new Dictionary<ulong, ReadOnlyMemory<byte>>()));
             using (var restore = observer.CreateCommand())
             { restore.CommandText = "UPDATE events SET plaintext=$original WHERE direction=2;"; restore.Parameters.AddWithValue("$original", acceptance); Assert.Equal(1, restore.ExecuteNonQuery()); }
             Assert.Equal(before.Exact.ToArray(), after.VerifyTip().Exact.ToArray());
-            Assert.Equal(effects.After.ToArray(), after.ReadCompleteCompactionProjection());
-            // Missing history is never initialized by a reader.
-            await secure.DeleteBatchAsync([Did2MessagingHistoryCheckpoint.Slot(sender)]);
-            await Assert.ThrowsAsync<InvalidDataException>(() => Did2MessagingHistoryCheckpoint.ReadRegisteredAsync(secure, sender, default));
-            using (var missing = await secure.ReadOwnedAsync(Did2MessagingHistoryCheckpoint.Slot(sender))) Assert.Null(missing);
-            await secure.WriteBatchAsync([new(Did2MessagingHistoryCheckpoint.Slot(sender), candidate.Exact)]); // Fixture restoration only.
+            Assert.Equal(effects.After.ToArray(), after.ReadArchivePrefixProjection(before, selected.Plan, candidate, new Dictionary<ulong, ReadOnlyMemory<byte>>()));
+            // Missing independent archive custody is never initialized by a reader.
+            await secure.DeleteBatchAsync([Did2MessagingArchiveRoot.Slot(sender)]);
+            await Assert.ThrowsAsync<InvalidDataException>(() => Did2MessagingArchiveRoot.ReadRegisteredAsync(secure, sender, default));
+            using (var missing = await secure.ReadOwnedAsync(Did2MessagingArchiveRoot.Slot(sender))) Assert.Null(missing);
+            await secure.WriteBatchAsync([new(Did2MessagingArchiveRoot.Slot(sender), candidate.Exact)]); // Fixture restoration only.
+            Assert.Equal(history.Exact.ToArray(), (await Did2MessagingHistoryCheckpoint.ReadRegisteredAsync(secure, sender, default)).Exact.ToArray());
         });
         Assert.Equal(before.Exact.ToArray(), (await fixture.ReadMessagingFloor(sender)).Exact.ToArray());
         using (var replay = await fixture.ReceiveOwnedMessage(sender, ciphertext)) { }

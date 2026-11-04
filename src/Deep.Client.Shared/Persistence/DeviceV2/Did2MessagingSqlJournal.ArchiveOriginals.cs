@@ -62,10 +62,10 @@ internal sealed partial class Did2MessagingSqlJournal
         catch { foreach (var item in result) item.Dispose(); throw; }
     }
 
-    internal (byte[] Metadata, byte[] Hello) ReadArchiveInitialSource()
+    internal (byte[] Metadata, byte[] Hello) ReadArchiveInitialSource(SqliteTransaction? tx = null)
     {
-        var metadata = ReadInitialMetadata();
-        using var query = Command("SELECT hello,typeof(hello),length(hello),metadata,typeof(metadata),length(metadata) FROM initial_events WHERE singleton=1;");
+        var metadata = ReadInitialMetadata(tx);
+        using var query = Command("SELECT hello,typeof(hello),length(hello),metadata,typeof(metadata),length(metadata) FROM initial_events WHERE singleton=1;", tx);
         using var row = query.ExecuteReader();
         if (!row.Read() || row.GetString(1) != "blob" || row.GetInt64(2) is < 1 or > 32768 ||
             row.GetString(4) != "blob" || row.GetInt64(5) != 672 || !Fixed(row.GetFieldValue<byte[]>(3), metadata))

@@ -90,6 +90,8 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         await fixture.AssertSenderCompactionIdle(sender);
         Assert.Equal(stable.Exact.ToArray(), (await fixture.ReadMessagingFloor(sender)).Exact.ToArray());
         Assert.Equal(6, (await fixture.ListOwnedMessages(receiver)).Count);
+        await fixture.CheckCompactionFinalCleanupPhysicalRead(sender);
+        await fixture.CheckCompactionFinalCleanupPhysicalRead(sender, authoredSource: true);
         CryptographicOperations.ZeroMemory(acceptance);
     }
 
@@ -184,12 +186,108 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             }
             finally { if (plaintext is not null) CryptographicOperations.ZeroMemory(plaintext); }
         }
+        internal async Task CheckCompactionFinalCleanupPhysicalRead(Did2MessagingSessionScope scope, bool authoredSource = false)
+        {
+            using var draft = await CreateOwnedText(scope, "verify actual native source after plan cleanup");
+            var operation = draft.OperationId.ToArray(); byte[] envelope;
+            using (var sent = await SendOwnedMessage(scope, operation, ApplicationCoreCodec.DecodeDmc2(draft.ExactDmc2.Span)))
+                envelope = sent.ExactEnvelope.ToArray();
+            var floor = await ReadMessagingFloor(scope);
+            var history = await Did2MessagingHistoryCheckpoint.ReadRegisteredAsync(storage, scope, default);
+            var archiveBefore = await Did2MessagingArchiveRoot.ReadRegisteredAsync(storage, scope, default);
+            using var writer = await (authoredSource ? ArchiveAuthoredFixtureWriter(scope) : ArchiveFixtureWriter(scope));
+            object[] authored = authoredSource ? await CaptureOrdinaryWorkingRow(scope, operation) : [];
+            var hit = false;
+            try
+            {
+                using (Did2CompactionTestHooks.Push(point =>
+                {
+                    if (point != Did2CompactionFailpoint.AfterPlanCleared) return;
+                    hit = true;
+                    writer.Execute(connection =>
+                    {
+                        using var corrupt = connection.CreateCommand();
+                        corrupt.CommandText = authoredSource
+                            ? "UPDATE direct_text_outbox SET sender_sequence=sender_sequence+1 WHERE operation_id=$operation;"
+                            : "UPDATE events SET envelope=zeroblob(length(envelope)) WHERE operation=$operation;";
+                        corrupt.Parameters.AddWithValue("$operation", operation); Assert.Equal(1, corrupt.ExecuteNonQuery());
+                    });
+                }))
+                {
+                    var error = await Record.ExceptionAsync(() => CompactSenderPrefix(scope, 1, default));
+                    Assert.True(hit, "The durable plan-cleanup callback did not run.");
+                    Assert.True(error is InvalidDataException or CryptographicException or FormatException,
+                        "Compaction returned success without a fresh paired source read after its final cleanup callback: " + (error?.GetType().Name ?? "none"));
+                }
+                // The callback is after commit. Reject the result while keeping
+                // the actual committed archive and immutable source history.
+                await AssertSenderCompactionIdle(scope);
+                Assert.Equal(floor.Exact.ToArray(), (await ReadMessagingFloor(scope)).Exact.ToArray());
+                Assert.Equal(history.Exact.ToArray(), (await Did2MessagingHistoryCheckpoint.ReadRegisteredAsync(storage, scope, default)).Exact.ToArray());
+                var archiveAfter = await Did2MessagingArchiveRoot.ReadRegisteredAsync(storage, scope, default);
+                Assert.Equal(floor.Exact.ToArray(), archiveAfter.Basis.Exact.ToArray());
+                Assert.Equal(archiveBefore.ArchiveCount + 1, archiveAfter.ArchiveCount);
+            }
+            finally
+            {
+                writer.Execute(connection =>
+                {
+                    using var restore = connection.CreateCommand();
+                    restore.CommandText = authoredSource
+                        ? "UPDATE direct_text_outbox SET sender_sequence=$sequence WHERE operation_id=$operation;"
+                        : "UPDATE events SET envelope=$envelope WHERE operation=$operation;";
+                    if (authoredSource) restore.Parameters.AddWithValue("$sequence", authored[5]);
+                    else restore.Parameters.AddWithValue("$envelope", envelope);
+                    restore.Parameters.AddWithValue("$operation", operation); Assert.Equal(1, restore.ExecuteNonQuery());
+                });
+                CryptographicOperations.ZeroMemory(envelope); CryptographicOperations.ZeroMemory(operation);
+                foreach (var bytes in authored.OfType<byte[]>()) CryptographicOperations.ZeroMemory(bytes);
+            }
+            ColdReopenCompactionStorage(); using var current = await ReadSenderCompactionCurrent(); Assert.NotNull(current);
+        }
+
+        internal async Task<byte[]> CaptureCompactionArchiveStorage(Did2MessagingSessionScope scope)
+        {
+            byte[] digest = [];
+            await WithCompactionConnection(scope, connection =>
+            {
+                using var bytes = new MemoryStream();
+                using (var writer = new BinaryWriter(bytes, System.Text.Encoding.UTF8, leaveOpen: true))
+                {
+                    foreach (var (table, key) in new[] { ("archive_nodes", "hash"), ("archive_reducers", "hash"), ("archive_state", "singleton") })
+                    {
+                        writer.Write(table);
+                        using var query = connection.CreateCommand(); query.CommandText = $"SELECT {key},exact FROM {table} ORDER BY {key};";
+                        using var rows = query.ExecuteReader();
+                        while (rows.Read())
+                        {
+                            writer.Write(true);
+                            for (var column = 0; column < 2; column++)
+                            {
+                                if (rows.GetValue(column) is long number) { writer.Write((byte)1); writer.Write(number); }
+                                else
+                                {
+                                    var cell = Assert.IsType<byte[]>(rows.GetValue(column));
+                                    try { writer.Write((byte)2); writer.Write(cell.Length); writer.Write(cell); }
+                                    finally { CryptographicOperations.ZeroMemory(cell); }
+                                }
+                            }
+                        }
+                        writer.Write(false);
+                    }
+                }
+                digest = SHA256.HashData(bytes.GetBuffer().AsSpan(0, checked((int)bytes.Length)));
+            });
+            return digest;
+        }
+
         internal async Task AssertCompactionRefusalDoesNotMutate(Did2MessagingSessionScope scope)
         {
             var slots = new[] { Did2CompactionPlan.Slot, ProtectedDid2CompactionPlan.PartSlot(0),
                 ProtectedDid2MessagingSessionCatalog.Slot, scope.FloorSlot, Did2MessagingHistoryCheckpoint.Slot(scope),
-                ProtectedDid2MessagingPeerBootstrap.Slot(scope), SqliteDeepIdV2AccountGeneration.CompactionRegistrationSlot };
+                ProtectedDid2MessagingPeerBootstrap.Slot(scope), Did2MessagingArchiveRoot.Slot(scope), SqliteDeepIdV2AccountGeneration.CompactionRegistrationSlot };
             var before = new List<byte[]?>(); byte[]? sqlBefore = null, sqlAfter = null;
+            var archiveBefore = await CaptureCompactionArchiveStorage(scope);
             foreach (var slot in slots)
             { using var value = await storage.ReadOwnedAsync(slot); before.Add(value?.Use(bytes => SHA256.HashData(bytes))); }
             var history = await Did2MessagingHistoryCheckpoint.ReadRegisteredAsync(storage, scope, default);
@@ -199,6 +297,8 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             { using var value = await storage.ReadOwnedAsync(slots[index]); Assert.Equal(before[index], value?.Use(bytes => SHA256.HashData(bytes))); }
             await WithCompactionConnection(scope, connection => sqlAfter = new Did2MessagingSqlJournal(connection, scope, history).ReadCompleteCompactionProjection());
             Assert.Equal(sqlBefore, sqlAfter);
+            Assert.Equal(archiveBefore, await CaptureCompactionArchiveStorage(scope));
+            CryptographicOperations.ZeroMemory(archiveBefore);
             foreach (var value in before) if (value is not null) CryptographicOperations.ZeroMemory(value);
         }
         internal ProtectedDeepIdV2AccountOwner SenderCompactionOwner() => new(storage,

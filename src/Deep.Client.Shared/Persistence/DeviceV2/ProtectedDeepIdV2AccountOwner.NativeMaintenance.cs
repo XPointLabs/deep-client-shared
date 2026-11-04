@@ -80,6 +80,8 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 var actualSql = await opened.WithSqlAsync(sql => sql.VerifyTip(), ct).ConfigureAwait(false);
                 if (!Did2MessagingSessionScope.Fixed(floor.Exact.Span, actualSql.Exact.Span))
                     throw new CryptographicException("Cold native archive audit lost its independent floor.");
+                var archive = await Did2MessagingArchiveRoot.ReadRegisteredAsync(storage, scope, ct).ConfigureAwait(false);
+                _ = await VerifyArchiveSemanticsUnderLeaseAsync(opened, archive, held, ct).ConfigureAwait(false);
             }
             using var readback = await catalogOwner.ReadAsync(ct).ConfigureAwait(false);
             if (!Did2MessagingSessionScope.Fixed(catalogHash, SHA256.HashData(readback.Exact.Span)))

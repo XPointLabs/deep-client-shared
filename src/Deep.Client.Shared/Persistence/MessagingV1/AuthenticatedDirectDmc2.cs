@@ -98,29 +98,34 @@ internal sealed class AuthenticatedDirectDmc2 : IDisposable, IAuthenticatedDmc2I
     ReadOnlyMemory<byte> IAuthenticatedDmc2InboxEvent.AuthorDeviceId => AuthorDeviceId;
     Dmc2ContentKind IAuthenticatedDmc2InboxEvent.ContentKind => ContentKind;
 
-    internal static AuthenticatedDirectDmc2 FromOwnedDid2Commit(
+    internal static async Task<AuthenticatedDirectDmc2> FromOwnedDid2CommitAsync(
         OwnedDid2MessagingStorage opened, Did2MessagingFloor floor,
-        ReadOnlySpan<byte> operation, ReadOnlySpan<byte> localSendDmc2)
+        ReadOnlyMemory<byte> operation, ReadOnlyMemory<byte> localSendDmc2, CancellationToken ct)
     {
         var scope = opened.Scope;
-        using var retained = opened.Sql.ReadVerifiedOperation(floor, operation) ??
-            throw new CryptographicException("DID2 semantic handoff has no actual committed event.");
-        var send = retained.Direction == 1;
-        using var owned = send ? new OwnedDeepSecret(localSendDmc2) : retained.OwnAuthenticatedDmc2();
-        var op = operation.ToArray();
+        var op = operation.ToArray(); var sent = localSendDmc2.ToArray();
         try
         {
-            return owned.Use(exact =>
+            return await opened.WithSqlAsync(sql =>
             {
-                if (!Fixed(SHA256.HashData(exact), retained.EventHash))
-                    throw new CryptographicException("DID2 semantic handoff differs from the committed event hash.");
-                return new AuthenticatedDirectDmc2(exact, scope.Network, scope.LocalAccount,
-                    BinaryPrimitives.ReadUInt64BigEndian(scope.Exact[84..]), scope.LocalDevice, scope.Conversation,
-                    send ? scope.LocalAccount : scope.RemoteAccount,
-                    send ? scope.LocalDevice : scope.RemoteDevice, op, retained.EnvelopeHash);
-            });
+                if (!Fixed(sql.ReadOpenedFloor().Exact.Span, floor.Exact.Span))
+                    throw new CryptographicException("DID2 semantic handoff protected floor changed before fresh native read.");
+                using var retained = sql.ReadVerifiedOperation(floor, op) ??
+                    throw new CryptographicException("DID2 semantic handoff has no actual committed event.");
+                var send = retained.Direction == 1;
+                using var owned = send ? new OwnedDeepSecret(sent) : retained.OwnAuthenticatedDmc2();
+                return owned.Use(exact =>
+                {
+                    if (!Fixed(SHA256.HashData(exact), retained.EventHash))
+                        throw new CryptographicException("DID2 semantic handoff differs from the committed event hash.");
+                    return new AuthenticatedDirectDmc2(exact, scope.Network, scope.LocalAccount,
+                        BinaryPrimitives.ReadUInt64BigEndian(scope.Exact[84..]), scope.LocalDevice, scope.Conversation,
+                        send ? scope.LocalAccount : scope.RemoteAccount,
+                        send ? scope.LocalDevice : scope.RemoteDevice, op, retained.EnvelopeHash);
+                });
+            }, ct).ConfigureAwait(false);
         }
-        finally { CryptographicOperations.ZeroMemory(op); }
+        finally { CryptographicOperations.ZeroMemory(op); CryptographicOperations.ZeroMemory(sent); }
     }
 
     internal static async ValueTask<AuthenticatedDirectDmc2?> FromCommittedStageAsync(

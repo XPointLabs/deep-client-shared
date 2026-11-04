@@ -175,7 +175,7 @@ internal sealed class Did2CompactionPlan : IDisposable
         for (var i = 0; i < roots; i++)
         {
             var record = raw.Slice(HeaderBytes + i * RootBytes, RootBytes);
-            if (record[0] is < 1 or > 18 || record[1] is not (1 or 2) || !Zero(record.Slice(2, 2))) throw Bad();
+            if (record[0] is < 1 or > 18 || oldEnrollment && record[0] > 17 || record[1] is not (1 or 2) || !Zero(record.Slice(2, 2))) throw Bad();
             if (record[0] is (byte)RootKind.SessionCatalog or (byte)RootKind.AccountRegistration or (byte)RootKind.NativeFence or (byte)RootKind.MessagingPeerBootstrap or (byte)RootKind.MailboxStoreState or (byte)RootKind.MailboxLocalCustody or (byte)RootKind.MailboxContactCustody && record[1] != 2) throw Bad();
             if (record[0] is >= 1 and <= 5 or 7 or 8 or 12 or 13 or 14 or 15 or 16 or 17 && !globalRoots.Add((RootKind)record[0])) throw Bad();
             Require32(record.Slice(4, 32)); Require32(record.Slice(36, 32)); Require32(record.Slice(68, 32));
@@ -237,14 +237,16 @@ internal sealed class Did2CompactionPlan : IDisposable
             }
         }
         else if (changedKinds.Contains(RootKind.MessagingArchive) || !oldEnrollment &&
-            guards.Contains(RootKind.MessagingHistoryCheckpoint) && !guards.Contains(RootKind.MessagingArchive)) throw Bad();
+            (changedKinds.Contains(RootKind.MessagingHistoryCheckpoint) ||
+             guards.Contains(RootKind.MessagingHistoryCheckpoint) && !guards.Contains(RootKind.MessagingArchive))) throw Bad();
         // This action owns one closed joint SQL + grant/read/publication profile.
         // Other compaction profiles cannot borrow these roots or this action.
         if (actions.Overlaps([Disposition.StoppedOutboxPayload, Disposition.ExpiredTerminalAudit]))
         {
             RootKind[] expected = [RootKind.Ordinary, RootKind.Send, RootKind.Grant, RootKind.Read,
                 RootKind.SessionCatalog, RootKind.MessagingFloor, RootKind.Attachment, RootKind.AccountRegistration,
-                RootKind.MessagingHistoryCheckpoint, RootKind.MessagingPeerBootstrap, RootKind.MessagingArchive];
+                RootKind.MessagingHistoryCheckpoint, RootKind.MessagingPeerBootstrap];
+            if (!oldEnrollment) expected = [.. expected, RootKind.MessagingArchive];
             if (raw[2] != (byte)SqlTarget.Application || actions.Count != 1 || roots != expected.Length) throw Bad();
             for (var i = 0; i < expected.Length; i++)
             {

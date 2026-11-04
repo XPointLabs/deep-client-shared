@@ -13,6 +13,60 @@ internal sealed partial class Did2MessagingSqlJournal
         IReadOnlyList<Did2MessagingArchivePatricia.Node> TreeNodes, Did2MessagingArchiveReducer Reducer,
         IReadOnlyList<Did2MessagingArchivePatricia.Node> ProofNodes);
 
+    // Detached, verified originals for the independent authored application join.
+    // Own reducer references are bounded metadata, never a lifetime source scan.
+    internal IReadOnlyList<Did2MessagingArchiveOriginal> ReadArchivePrefixAuthoredSources(
+        Did2MessagingFloor stable, int prefixRows, Did2MessagingArchiveRoot? successor = null)
+    {
+        if (archiveEnrollment || archiveRoot is null || prefixRows is < 1 or > 32)
+            throw new InvalidDataException("Archive prefix source selection requires its indexed bounded profile.");
+        RequireCipherPolicy(); ValidateSchema(); using var tx = connection.BeginTransaction(deferred: true);
+        var mirror = ReadDeltaMirror(tx);
+        if (!Fixed(mirror.Exact.Span, archiveRoot.Exact.Span) &&
+            (successor is null || !Fixed(mirror.Exact.Span, successor.Exact.Span)))
+            throw new CryptographicException("Archive prefix source selection has another SQL mirror.");
+        var source = ForOrdinaryRuntime(connection, scope, historyRoot, mirror);
+        source.RequireSame(stable, source.VerifyActiveTip(tx, null, out var headers));
+        var selected = new Dictionary<ulong, Did2MessagingArchiveOriginal>();
+        try
+        {
+            if (successor is not null && Fixed(mirror.Exact.Span, successor.Exact.Span))
+            {
+                if (successor.Basis.Ordinal < (ulong)prefixRows) throw new InvalidDataException("Archive prefix selected ordinal range underflows.");
+                var number = new byte[8];
+                for (var ordinal = successor.Basis.Ordinal - (ulong)prefixRows + 1; ordinal <= successor.Basis.Ordinal; ordinal++)
+                {
+                    if (ordinal <= 2) continue;
+                    BinaryPrimitives.WriteUInt64BigEndian(number, ordinal);
+                    var fact = source.ReadArchiveFact(Did2MessagingArchiveFamily.Ordinal, number, tx) ??
+                        throw new CryptographicException("Archive prefix source selection omitted an original.");
+                    Add(Did2MessagingArchiveReference.Decode(fact, false));
+                }
+            }
+            else
+            {
+                if (prefixRows > headers.Count) throw new InvalidDataException("Archive prefix exceeds its source suffix.");
+                for (var index = 0; index < prefixRows; index++)
+                {
+                    var metadata = headers[index]; if (metadata[5] is not (2 or 5)) continue;
+                    using var tuple = new SelectedTuple(checked(mirror.Basis.Ordinal + (ulong)index + 1), metadata[6], metadata.AsSpan(268, 32).ToArray(), metadata.ToArray());
+                    Add(source.CaptureTupleReference(tuple, tx));
+                }
+            }
+            var reducer = source.ReadArchiveReducer(tx);
+            foreach (var kind in new[] { Did2MessagingArchiveReducer.ReferenceKind.OwnHead,
+                Did2MessagingArchiveReducer.ReferenceKind.OwnPrevious, Did2MessagingArchiveReducer.ReferenceKind.Consent })
+                Add(reducer.Reference(kind));
+            return selected.OrderBy(pair => pair.Key).Select(pair => pair.Value).ToArray();
+        }
+        catch { foreach (var original in selected.Values) original.Dispose(); throw; }
+        void Add(Did2MessagingArchiveReference reference)
+        {
+            if (reference.Kind != 2 || reference.Direction != 1 || selected.ContainsKey(reference.Ordinal)) return;
+            selected.Add(reference.Ordinal, source.ReadArchiveOriginal(reference, tx));
+        }
+    }
+
     internal ArchivePrefixEffects CaptureArchivePrefixEffects(Did2MessagingFloor stable, int prefixRows,
         IReadOnlyDictionary<ulong, ReadOnlyMemory<byte>> qualifiedAuthored)
     {

@@ -45,7 +45,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         OwnedInitialMessagingSeed.RequireFreshScope(scope, own.Proof, peer, first);
         using var opened = await OpenNativeMessagingUnderLeaseAsync(current, scope, held, ct).ConfigureAwait(false);
         var floor = await opened.Custody.ReconcileAsync(ct).ConfigureAwait(false);
-        var disposition = ClassifyBraidMailboxCustodyUnderLease(opened, scope, floor, frame, held, ct);
+        var disposition = await ClassifyBraidMailboxCustodyUnderLeaseAsync(opened, scope, floor, frame, held, ct).ConfigureAwait(false);
         await RequireFinalMessagingFreshnessAsync(current, scope, own, peer, source, held, first, ct).ConfigureAwait(false);
         ct.ThrowIfCancellationRequested(); held.RequireActive();
         return disposition != BraidMailboxCustody.NotCommitted;
@@ -53,7 +53,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
 
     private enum BraidMailboxCustody { NotCommitted, AuthenticatedReceive, ObsoletePurpose }
 
-    private BraidMailboxCustody ClassifyBraidMailboxCustodyUnderLease(OwnedDid2MessagingStorage opened,
+    private async Task<BraidMailboxCustody> ClassifyBraidMailboxCustodyUnderLeaseAsync(OwnedDid2MessagingStorage opened,
         Did2MessagingSessionScope scope, Did2MessagingFloor floor, UnverifiedDbr2Record frame,
         HeldDeepIdV2AccountLease held, CancellationToken ct)
     {
