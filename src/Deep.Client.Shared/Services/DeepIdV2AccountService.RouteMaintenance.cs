@@ -1,4 +1,6 @@
 using System.Security.Cryptography;
+using Deep.Client.Shared.Persistence.DeviceV2;
+using Deep.Client.Shared.Services.ContactV1;
 using Deep.Client.Shared.Services.ContactV2;
 using Deep.Protocol.Identity;
 using Deep.Protocol.ContactV1;
@@ -44,15 +46,54 @@ public sealed partial class DeepIdV2AccountService
                 : await PrepareOwnDirectRouteUpdateAsync(conversation.Scope, selection, source, ct).ConfigureAwait(false);
             using var native = await SendOwnedMessagingCoreAsync(conversation.Scope, command.OperationId,
                 command.ExactDmc2, source, ct, routeControl: true).ConfigureAwait(false);
-            var retained = await owner.ReadRetainedMessagingStoreAsync(TrustedUnixSeconds(), verifier,
-                conversation.Scope, command.OperationId, resolved.Own, source, ct).ConfigureAwait(false);
-            if (retained is null)
-                _ = await owner.DeliverRouteReintroductionAsync(TrustedUnixSeconds(), verifier, conversation.Scope,
-                    command.OperationId, resolved, source, new Did2MailboxGrantOnionTransport(source),
-                    new Did2OwnedMailboxOnionTransportFactory(), ct).ConfigureAwait(false);
+            _ = await DeliverOwnRouteReintroductionWithRecoveryAsync(conversation.Scope, command.OperationId,
+                peerAddress, resolved, source, new Did2MailboxGrantOnionTransport(source),
+                new Did2OwnedMailboxOnionTransportFactory(), ct).ConfigureAwait(false);
             return 1;
         }
         finally { CryptographicOperations.ZeroMemory(selection); }
+    }
+
+    // Selection, authoring and native encryption precede this boundary exactly
+    // once. Recovery reopens only this owned operation's original Store custody.
+    internal async Task<ClientMailboxStoreResult> DeliverOwnRouteReintroductionWithRecoveryAsync(
+        Did2MessagingSessionScope scope, ReadOnlyMemory<byte> operation, DeepPermanentIdV2 peerAddress,
+        DeepIdV2ContactPathAuthoritySource.PermanentContactAuthority firstContact,
+        DeepIdV2ContactPathAuthoritySource source, IDid2MailboxGrantTransport grants,
+        IDid2OwnedMailboxTransportFactory transport, CancellationToken ct,
+        IExactContactResolveOnionTransport? contactRead = null)
+    {
+        ArgumentNullException.ThrowIfNull(scope); ArgumentNullException.ThrowIfNull(peerAddress);
+        ArgumentNullException.ThrowIfNull(firstContact); ArgumentNullException.ThrowIfNull(source);
+        ArgumentNullException.ThrowIfNull(grants); ArgumentNullException.ThrowIfNull(transport);
+        source.RequireAccountOwner(this); ProtectedDph2PreClaimJournal.RequireIntent(operation.Span);
+        var exact = operation.ToArray(); var first = true;
+        try
+        {
+            async Task<ClientMailboxStoreResult> Attempt()
+            {
+                var initial = first; first = false;
+                using var reads = initial ? null : source.OpenIndependentCommandReadScope();
+                var currentSource = reads?.Source ?? source;
+                using var verifier = OpenVerifier();
+                var own = initial ? firstContact.Own :
+                    await currentSource.VerifyForOwnPreKeyAuthoringAsync(this, ct).ConfigureAwait(false);
+                var retained = await owner.ReadRetainedMessagingStoreAsync(TrustedUnixSeconds(), verifier,
+                    scope, exact, own, currentSource, ct).ConfigureAwait(false);
+                if (retained is not null) return retained;
+                // Original expiry/closure is checked before any new peer lookup.
+                await owner.RequireMessagingWorkNotStoppedAsync(TrustedUnixSeconds(), verifier,
+                    scope, exact, own, currentSource, ct).ConfigureAwait(false);
+                var currentContact = initial ? firstContact :
+                    await ResolveOwnedPermanentContactAsync(peerAddress, currentSource, contactRead, ct).ConfigureAwait(false);
+                return await owner.DeliverRouteReintroductionAsync(TrustedUnixSeconds(), verifier, scope,
+                    exact, currentContact, currentSource, grants, transport, ct).ConfigureAwait(false);
+            }
+            return await OwnedMailboxRecovery.RunAsync(Attempt,
+                () => source.DiscardUncapturedAuthorityAsync(ct),
+                () => Interlocked.Increment(ref storeResumes), () => Interlocked.Increment(ref recoveryLeaseWaits), ct).ConfigureAwait(false);
+        }
+        finally { CryptographicOperations.ZeroMemory(exact); }
     }
 
     // Synchronous historical proof verification only. No capability, current

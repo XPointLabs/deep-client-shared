@@ -203,3 +203,52 @@ then capture a new external baseline; it must not claim the first snapshot was
 reconstructed. No reset or new business round has occurred. The complete Shared
 reference union now contains2272 identities; full qualification remains deferred
 until the user's goal-first measurement and stabilization are complete.
+
+## Retained enrollment completed; route delivery still open
+
+`deep-cli/artifacts/retained-goal-20261104-04/maintenance01/archive-enrollment.json`
+passed for all three retained profiles:11 scopes and874 original native events,
+exact original/authored/counter/group preservation, completed full owner audits,
+no reset, no new business messages and unchanged group cursor60. The overall
+1800-second operator budget expired later in route catch-up; the enclosing run
+is therefore not a PASS. Its runtime and helper inputs remained unchanged.
+
+The separately reviewed already-indexed mode positively admits actual signed
+account plus atomic registration/catalog/progress, requires V2/all-indexed/no
+progress inside each fresh source baseline, and never invokes enrollment.
+`retained-goal-20261104-04/catchup01/already-indexed-baseline.json` passed all
+three profiles with290/320/269 native events after partial control recovery.
+It explicitly records a new baseline, not reconstruction of the prior RAM
+snapshot. The route attempt then stopped on IOException in the first role's
+ReintroduceContactRoute/DeliverOwnedMailbox path. Original pending work remains;
+no new business round or latency qualification follows from these receipts.
+
+A five-second CPU trace of the earlier one-time drain attributed all sampled
+active work to DrainOldArchiveEnrollmentPrefix, about69% to original-source
+verification. Source review found12 full source admissions per drain pass.
+Established DR-0179 operations already use native provenance instead; this
+measurement describes enrollment, not message delivery. Astra reviewed a
+possible transaction-local receiver ledger reuse (three traversals to two),
+preserving every surrounding admission/integrity check. It is deferred: it does
+not reduce SQLCipher opens and is not needed after the completed enrollment.
+
+## Prepared route reintroduction resumes its original operation
+
+The second dedicated catch-up completed one direction, then retained an unknown
+Store outcome when the deployed node's public network observation changed during
+the operation. That source fence remains mandatory: effects may already exist.
+Reintroduction now invokes the existing bounded mailbox recovery around the
+already authored and encrypted operation, using an owned operation copy. Recovery
+opens a fresh independent authority read, checks historical completion and the
+original deadline before a new recipient lookup, and resumes existing custody.
+Selection, authoring and native encryption are not repeated. Verified expired
+attempt rollover follows its existing contract; a live attempt keeps exact MAU
+bytes, grant, counter and nonce.
+
+Build38 passed with zero warnings/errors. Qualification20 passed all30 cases
+(two actual encrypted reintroduction regressions plus28 mailbox recovery cases),
+zero skips/failures and2331 unchanged inputs, native duration127.865s. The new
+cases prove exact prepared-request recovery after a lost reply, no second native
+send, and original-deadline refusal before fresh recipient lookup or dispatch.
+This is focused source evidence; matching retained CLI execution and full Shared
+qualification remain open under the user's goal-first order.
