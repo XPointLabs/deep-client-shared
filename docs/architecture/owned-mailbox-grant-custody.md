@@ -6,7 +6,7 @@ transitions remain owned by
 [TRANSPORT-NEUTRAL-MESSAGING §8.4](../../../docs/architecture/TRANSPORT-NEUTRAL-MESSAGING.md#84-owned-attempt-settlement-renewal-and-retirement).
 It does not allocate wire bytes, an algorithm, a network authority or a renewal
 policy. Runtime/test acceptance is recorded separately in the
-[checkpoint](../testing/s01-grant-acquisition-contract-2026-10-05.md).
+[checkpoint](https://github.com/XPointLabs/deep-client-shared/blob/ac8e049940d9bdda6bdb0368d20ceeb4ebe924ce/docs/testing/s01-grant-acquisition-contract-2026-10-05.md).
 
 ## Serialization
 
@@ -132,7 +132,7 @@ rejects, without a second reader, a migration or automatic reset.
 Protected network and directory floor validation uses the existing atomic
 inventory batch for its related current/future markers. Each call independently
 reacquires its snapshot and preserves every marker/anchor/rollback check; no
-retained plaintext or authority cache is involved. [Source receipt and scope](../testing/s05-protected-floor-batch-2026-10-16.md).
+retained plaintext or authority cache is involved. [Source receipt and scope](https://github.com/XPointLabs/deep-client-shared/blob/ac8e049940d9bdda6bdb0368d20ceeb4ebe924ce/docs/testing/s05-protected-floor-batch-2026-10-16.md).
 Phase3 retains exact holder/request/evidence with no winner; phases4/5 retain the
 same closure proof with one immutable late result. Their closure lower bound
 cannot precede XMG expiry. These checks establish custody shape, not current
@@ -181,7 +181,7 @@ The earliest signed interval controls the trigger; conservative integer rounding
 does not extend any interval. Pending successor work is resumed first and never
 replaces current until the existing complete protected promotion. This does not
 activate automatic grant renewal, rotation or retirement; current verification
-status belongs to the [S04 checkpoint](../testing/s04-lifecycle-2026-10-11.md).
+status belongs to the [S04 checkpoint](https://github.com/XPointLabs/deep-client-shared/blob/ac8e049940d9bdda6bdb0368d20ceeb4ebe924ce/docs/testing/s04-lifecycle-2026-10-11.md).
 The day-long initial-service cap exposed a DCB successor rejection during this
 existing route renewal. [DR-0127](../../../docs/survival-program/decisions/DR-0127-capped-contact-object-successor-validity.md)
 owns the corrected predicate; Shared adds no alternative author, journal or retry.
@@ -388,7 +388,7 @@ without a current directory proof, network fetch, signing or issuer callback.
 It returns metadata only, not a reminted exclusion or deletion capability.
 Recovery still needs the closed owner profile and all dependency readbacks;
 capturing this guard alone cannot remove grant/send/read/ACK or receipt state.
-The [focused checkpoint](../testing/s01-native-replay-fence-2026-10-06.md)
+The [focused checkpoint](https://github.com/XPointLabs/deep-client-shared/blob/ac8e049940d9bdda6bdb0368d20ceeb4ebe924ce/docs/testing/s01-native-replay-fence-2026-10-06.md)
 records the tested source boundary. Full S01 retirement remains unaccepted.
 
 ## Held retirement dependency capture
@@ -449,7 +449,7 @@ adopted, only matching remaining parts may be disposed, then the plan clears.
 with all exact predecessors/guards intact, persisting the existing abort phase
 before disposal. A committed phase2 cannot abort/reselect even before grant
 adoption. Cancellation leaves the already-staged plan owning exact recovery.
-The [current coupled full source gate](../testing/s01-closed-deposit-retirement-2026-10-06.md#current-coupled-full--accepted-unused-deposit-profile)
+The [current coupled full source gate](https://github.com/XPointLabs/deep-client-shared/blob/ac8e049940d9bdda6bdb0368d20ceeb4ebe924ce/docs/testing/s01-closed-deposit-retirement-2026-10-06.md#current-coupled-full--accepted-unused-deposit-profile)
 qualifies this narrow profile:706/0/0, observed terminal0, all200 current/all687
 prior cases Passed and62/62 frozen inputs exact. The broader S01/S04
 lifecycle/receipt/object consumers remain unfinished. The encrypted-journal reopen fixture uses
@@ -515,7 +515,7 @@ retirement. New successor dispatch, changed-route custody and linked cleanup
 still require their connected producers/consumers and matching gates.
 This is a pre-production reset boundary in the same SQLCipher database, not a
 migration, another runtime reader or extra journal slot.
-The [current source checkpoint](../testing/s01-idle-mailbox-floors-2026-10-09.md#original-public-store-outcome-source--dr-0106)
+The [current source checkpoint](https://github.com/XPointLabs/deep-client-shared/blob/ac8e049940d9bdda6bdb0368d20ceeb4ebe924ce/docs/testing/s01-idle-mailbox-floors-2026-10-09.md#original-public-store-outcome-source--dr-0106)
 records qualification and remaining gates; it permits no known acquisition or
 last retained Retrieve/ACK deletion.
 
@@ -649,13 +649,13 @@ commit/adoption and uses the shared CAS/parts/abort protocol without fresh
 proofs, signing, transport callbacks or reissuing the request.
 
 The matching targeted source packet passed65/0/0/native0; exact evidence is
-in the [checkpoint](../testing/s01-idle-mailbox-floors-2026-10-09.md#used-deposit-holder-retirement--targeted-source-checkpoint).
-The subsequent [actual chain-owner packet](../testing/s01-idle-mailbox-floors-2026-10-09.md#used-deposit-chain--actual-owner-checkpoint)
+in the [checkpoint](https://github.com/XPointLabs/deep-client-shared/blob/ac8e049940d9bdda6bdb0368d20ceeb4ebe924ce/docs/testing/s01-idle-mailbox-floors-2026-10-09.md#used-deposit-holder-retirement--targeted-source-checkpoint).
+The subsequent [actual chain-owner packet](https://github.com/XPointLabs/deep-client-shared/blob/ac8e049940d9bdda6bdb0368d20ceeb4ebe924ce/docs/testing/s01-idle-mailbox-floors-2026-10-09.md#used-deposit-chain--actual-owner-checkpoint)
 passed9/0/0/native0: two original Stores under distinct adopted holders,
 oldest-first cold recovery, preserved successor custody and pinning by an
 unknown successor send. Its signed selection setup uses the controlled producer
 fixture; it does not qualify autonomous runtime renewal.
-The [issuer-rotation/index packet](../testing/s01-idle-mailbox-floors-2026-10-09.md#original-issuer-rotation-and-actual-traversal-dependency-index)
+The [issuer-rotation/index packet](https://github.com/XPointLabs/deep-client-shared/blob/ac8e049940d9bdda6bdb0368d20ceeb4ebe924ce/docs/testing/s01-idle-mailbox-floors-2026-10-09.md#original-issuer-rotation-and-actual-traversal-dependency-index)
 additionally checks genuine root-signed issuer-key replacement for original
 initial/acceptance Stores, refusal of current-policy substitution and preserved
 original outcomes after cold holder retirement. It does not qualify independent
@@ -710,7 +710,7 @@ wire, journal generation, compatibility reader or namespace tombstone is added.
 This is same-original-path holder replacement, not retirement of a traversal or
 the last retained path. Autonomous renewal/cleanup remains S04; source receipts,
 matching full and remaining S01/physical/release status belong to the
-[checkpoint](../testing/s01-idle-mailbox-floors-2026-10-09.md).
+[checkpoint](https://github.com/XPointLabs/deep-client-shared/blob/ac8e049940d9bdda6bdb0368d20ceeb4ebe924ce/docs/testing/s01-idle-mailbox-floors-2026-10-09.md).
 
 ## Closed unused Retrieve retirement — S01 source candidate
 
@@ -832,7 +832,7 @@ actual SQL reader does. Existing exact scope/counter reuse remains possible at a
 full bound; a full journal is not blanket permission to block retained work.
 No retirement, rotation or autonomous worker
 is activated by this source increment; qualification remains in the
-[S04 checkpoint](../testing/s04-lifecycle-2026-10-11.md).
+[S04 checkpoint](https://github.com/XPointLabs/deep-client-shared/blob/ac8e049940d9bdda6bdb0368d20ceeb4ebe924ce/docs/testing/s04-lifecycle-2026-10-11.md).
 
 ## Closed unused renewal-tail disposition — S01 source candidate
 
@@ -952,7 +952,7 @@ contact through disposition/replay. Cold/cancel handovers, missing dependency
 refusals and exact SQL/protected readbacks are included in the matching accepted
 Shared full895/0/0. Model tests alone are not deletion authority. Exact native
 exits, unchanged-input proof, prior FAILs and the remaining whole-S01 review are
-owned by the [checkpoint](../testing/s01-idle-mailbox-floors-2026-10-09.md#matching-full03--current-shared-source-qualified).
+owned by the [checkpoint](https://github.com/XPointLabs/deep-client-shared/blob/ac8e049940d9bdda6bdb0368d20ceeb4ebe924ce/docs/testing/s01-idle-mailbox-floors-2026-10-09.md#matching-full03--current-shared-source-qualified).
 This source profile does not activate the S04 scheduler or qualify production,
 physical clients, shipping packages or a release.
 
@@ -977,7 +977,7 @@ Known unused Retrieve and archived-path automatic consumption are separate
 S04 joins, not granted permission by this Deposit consumer. Their current
 consumers and source qualification are described below.
 Exact local native cases and preserved compile failure are in the
-[lifecycle checkpoint](../testing/s04-lifecycle-2026-10-11.md#known-unused-adopted-deposit).
+[lifecycle checkpoint](https://github.com/XPointLabs/deep-client-shared/blob/ac8e049940d9bdda6bdb0368d20ceeb4ebe924ce/docs/testing/s04-lifecycle-2026-10-11.md#known-unused-adopted-deposit).
 
 ## S04 automatic archived-path maintenance — focused source qualification
 
@@ -1001,7 +1001,7 @@ new journal/wire/API/generation, bound increase or background worker is introduc
 Matching native cases verify ordinary reads, early-retention refusal and all eight
 cold handovers. The preserved fixture FAIL and actual elapsed-time correction,
 exact receipts and source/physical scope are in the
-[checkpoint](../testing/s04-lifecycle-2026-10-11.md#automatic-archived-path-consumer).
+[checkpoint](https://github.com/XPointLabs/deep-client-shared/blob/ac8e049940d9bdda6bdb0368d20ceeb4ebe924ce/docs/testing/s04-lifecycle-2026-10-11.md#automatic-archived-path-consumer).
 This is not whole-S04, deployed/runtime package or Windows/Android qualification.
 
 ## S04 never-used superseded Retrieve — focused source qualification
@@ -1032,7 +1032,7 @@ encrypted cold recovery. The current/last holder still cannot retire; a fresh
 replacement credential alone cannot authorize it. No new journal, bound, wire,
 public authority or background scheduler. Exact affected23/native receipts,
 preserved connected43 FAIL and current-source limitations are owned by the
-[checkpoint](../testing/s04-lifecycle-2026-10-11.md#never-used-superseded-retrieve).
+[checkpoint](https://github.com/XPointLabs/deep-client-shared/blob/ac8e049940d9bdda6bdb0368d20ceeb4ebe924ce/docs/testing/s04-lifecycle-2026-10-11.md#never-used-superseded-retrieve).
 
 ## S05 expired active Retrieve — source candidate, not device acceptance
 
@@ -1048,7 +1048,7 @@ not permission to evict them. Captured-page and ACK recovery are separate scopes
 the current final-page continuation is described below, not by this producer.
 
 The current source receipts and remaining acceptance work are recorded in the
-[focused checkpoint](../testing/s05-expired-active-retrieve-2026-10-16.md).
+[focused checkpoint](https://github.com/XPointLabs/deep-client-shared/blob/ac8e049940d9bdda6bdb0368d20ceeb4ebe924ce/docs/testing/s05-expired-active-retrieve-2026-10-16.md).
 No account reset, old-frame renewal or physical delivery claim is implied.
 
 ## Current final-page ACK continuation
@@ -1066,4 +1066,4 @@ The endpoint-set acquisition retry is pre-ACK only: discard the entire unused
 set, acquire fresh own plus every peer once, and repeat all current checks.
 It cannot retry an effect or retain half of an old set. Source tests and real
 retained CLI evidence are separate from full/package/device acceptance; see
-[the CLI checkpoint](../../../deep-cli/docs/testing/cli-atomic-reservation-2026-10-20.md).
+[the CLI checkpoint](https://github.com/XPointLabs/deep-cli/blob/7605758e033cadf29a7ae31aa91d994722c6ed22/docs/testing/cli-atomic-reservation-2026-10-20.md).

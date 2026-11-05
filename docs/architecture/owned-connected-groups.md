@@ -161,7 +161,7 @@ both full callback fences; every retained/cached outcome crosses the owner's
 full final fence. Request bytes, native custody and deadlines are unchanged.
 
 The three-member functional cycle passed through the retained-state recovery
-recorded in the [CLI GSR checkpoint](../../../deep-cli/docs/testing/cli-gsr-groups-2026-10-18.md).
+recorded in the [CLI GSR checkpoint](https://github.com/XPointLabs/deep-cli/blob/7605758e033cadf29a7ae31aa91d994722c6ed22/docs/testing/cli-gsr-groups-2026-10-18.md).
 That result is not a first-attempt latency qualification.
 Long-offline/400-day retention, descriptor rotation/handover, multi-device changes,
 large fanout, crash/fault matrix and full source/package/device/release acceptance

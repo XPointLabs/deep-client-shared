@@ -1,7 +1,7 @@
 # Account-owned ordinary authored counter custody
 
 Semantic owner: [TRANSPORT-NEUTRAL-MESSAGING §8.4.3](../../../docs/architecture/TRANSPORT-NEUTRAL-MESSAGING.md#843-compaction-and-boundedness).
-Local format/API decisions: [DR-0098](../../../docs/survival-program/decisions/DR-0098-owned-authored-counter-floors.md)
+Local format/API owner: [bounded layout](#one-local-reader-and-bounded-layout)
 and [DR-0110](../../../docs/survival-program/decisions/DR-0110-did2-private-route-update-custody.md).
 This describes the current private Shared implementation, not wire authority,
 cleanup activation, a semantic receipt, a new session or device qualification.
@@ -494,7 +494,7 @@ acquires a replacement grant, dispatches or encrypts again. Missing evidence or
 an actually unknown SQL outcome remains unresolved and cannot gain this result.
 Source-only regression candidates cover both local completion handovers with
 and without original policy/epoch expiry; qualification is tracked in the
-[S04 checkpoint](../testing/s04-lifecycle-2026-10-11.md).
+[S04 checkpoint](https://github.com/XPointLabs/deep-client-shared/blob/ac8e049940d9bdda6bdb0368d20ceeb4ebe924ce/docs/testing/s04-lifecycle-2026-10-11.md).
 
 Local recovery of an already-owned compaction plan uses caller cancellation.
 The separate existing network freshness budget starts after that local peer
@@ -516,7 +516,7 @@ before capacity checks, authored reservation or SQL materialization. A retained
 operation rejects instead of minting a new logical event or reconstructing its
 working payload. This covers the same exact session scope while native event
 custody remains verifiable; it is not a namespace-retirement fence or permission
-to remove that custody. The [focused replay receipt](../testing/s01-authored-counter-floors-2026-10-06.md#outbox-replay-prerequisite--focused-only)
+to remove that custody. The [focused replay receipt](https://github.com/XPointLabs/deep-client-shared/blob/ac8e049940d9bdda6bdb0368d20ceeb4ebe924ce/docs/testing/s01-authored-counter-floors-2026-10-06.md#outbox-replay-prerequisite--focused-only)
 is separate from the earlier full-qualified counter-floor input.
 
 Pending-text projection checks the initialized catalog for all floor scopes and
@@ -544,7 +544,7 @@ and compacted commands. Local history, application receipt obligations, original
 transport outcomes, counter enrollment and protected floors remain independent.
 This source activation is not namespace retirement, a background scheduler,
 the full S04 sustained qualification or device delivery; matching evidence lives
-in the [S04 checkpoint](../testing/s04-lifecycle-2026-10-11.md).
+in the [S04 checkpoint](https://github.com/XPointLabs/deep-client-shared/blob/ac8e049940d9bdda6bdb0368d20ceeb4ebe924ce/docs/testing/s04-lifecycle-2026-10-11.md).
 
 ### Existing dependency owners
 
@@ -554,7 +554,7 @@ The following maps it to current consumers; it is not another outbox or
 permission to delete current rows. The narrow held messaging-prefix owner
 described below and the outbox-only owner are implemented; the other dispositions
 are still targets. The outbox affected readers and narrow owner/recovery are
-qualified by the [current coupled full receipt](../testing/s01-ordinary-outbox-disposition-2026-10-06.md#current-coupled-full-gate--accepted-outbox-only-slice).
+qualified by the [current coupled full receipt](https://github.com/XPointLabs/deep-client-shared/blob/ac8e049940d9bdda6bdb0368d20ceeb4ebe924ce/docs/testing/s01-ordinary-outbox-disposition-2026-10-06.md#current-coupled-full-gate--accepted-outbox-only-slice).
 
 | Current custody / consumer | Required integration consequence |
 | --- | --- |
@@ -695,7 +695,7 @@ The actual prefix owner below has a separate encrypted-storage/native recovery
 fixture. Other dispositions/fences and retained-object integration remain
 required before runtime compaction is installed. The earlier model full gate
 has frozen pre-registration binaries; current source cannot inherit that full
-receipt. [Exact source/testing boundary](../testing/s01-compaction-plan-model-2026-10-06.md#registrationstaging-working-source--separate-matrix).
+receipt. [Exact source/testing boundary](https://github.com/XPointLabs/deep-client-shared/blob/ac8e049940d9bdda6bdb0368d20ceeb4ebe924ce/docs/testing/s01-compaction-plan-model-2026-10-06.md#registrationstaging-working-source--separate-matrix).
 
 ## Messaging history checkpoint consumer
 
@@ -862,12 +862,12 @@ new operations retain monotonic sequence allocation. Original SQL attempts,
 grant attempts, receipts, native events, history, dedup, counters, asset keys and
 remote obligations are not retired.
 Implementation/build and focused fault evidence do not themselves qualify the
-required coupled full gate. The [historical single-root checkpoint](../testing/s01-ordinary-outbox-disposition-2026-10-06.md#current-coupled-full-gate--accepted-outbox-only-slice)
+required coupled full gate. The [historical single-root checkpoint](https://github.com/XPointLabs/deep-client-shared/blob/ac8e049940d9bdda6bdb0368d20ceeb4ebe924ce/docs/testing/s01-ordinary-outbox-disposition-2026-10-06.md#current-coupled-full-gate--accepted-outbox-only-slice)
 records full687/0/0 terminal0, all161 current/all678 prior cases Passed and55/55
 frozen inputs exact for Shared `574d934347fb21f48453def7541a0a7a7a86d06d`.
 This qualifies only that former single-root profile, not the current two-root
 increment, namespace/floor retirement or scheduler activation. Current source
-qualification is tracked in [the S01 checkpoint](../testing/s01-idle-mailbox-floors-2026-10-09.md).
+qualification is tracked in [the S01 checkpoint](https://github.com/XPointLabs/deep-client-shared/blob/ac8e049940d9bdda6bdb0368d20ceeb4ebe924ce/docs/testing/s01-idle-mailbox-floors-2026-10-09.md).
 
 ## Completed initial / ContactAccept send working entries
 
@@ -932,14 +932,14 @@ apply; the stored plan finishes without acquiring fresh network authority.
 This profile removes one completed native send's settled attempt chain, not its original acquisition
 or semantic/receipt/object source. S04 scheduler activation and whole S01/source,
 connected, package and device qualification remain separate. Exact evidence is
-tracked in the [S01 checkpoint](../testing/s01-idle-mailbox-floors-2026-10-09.md).
+tracked in the [S01 checkpoint](https://github.com/XPointLabs/deep-client-shared/blob/ac8e049940d9bdda6bdb0368d20ceeb4ebe924ce/docs/testing/s01-idle-mailbox-floors-2026-10-09.md).
 
 ## Remaining closure
 
 ### S04 contact-control working payload retirement — implementation in progress
 
 The successful grant/read lifecycle package is qualified separately in the
-[sustained checkpoint](../testing/s04-sustained-send-2026-10-12.md). It does not
+[sustained checkpoint](https://github.com/XPointLabs/deep-client-shared/blob/ac8e049940d9bdda6bdb0368d20ceeb4ebe924ce/docs/testing/s04-sustained-send-2026-10-12.md). It does not
 close contact-control retention. An active ContactAccept command retains full
 canonical content and is an independent explicit-consent source. Removing that
 entry based on Store, expiry or an empty SQL query would lose consent authority.
@@ -980,7 +980,7 @@ They may expose a temporary verified history copy for exact cached retry, never
 recreate working custody or perform fresh ratchet encryption without that original
 native operation. Historical route policy comes only from the fully joined event.
 Stored ContactAccept working-copy retirement has matching connected source
-qualification in [the contact checkpoint](../testing/s04-contact-retention-2026-10-12.md#matching-corrected-connected-qualification).
+qualification in [the contact checkpoint](https://github.com/XPointLabs/deep-client-shared/blob/ac8e049940d9bdda6bdb0368d20ceeb4ebe924ce/docs/testing/s04-contact-retention-2026-10-12.md#matching-corrected-connected-qualification).
 The current connected candidate also supports explicit pre-commit abandon through
 the same owner: exact unchanged roots, complete staged bytes and deterministic
 send/consent successors are required before the phase3 marker. Recovery discards
@@ -1013,7 +1013,7 @@ independently transferred source and native initial events. A normal draft read
 may return a disposable verified history copy, not recreate durable working
 custody. A retired draft cannot authorize another prekey claim. Matching native
 handover, marker corruption, cached Initial replay and fresh text/Store/receive
-evidence belongs to the [contact checkpoint](../testing/s04-contact-retention-2026-10-12.md);
+evidence belongs to the [contact checkpoint](https://github.com/XPointLabs/deep-client-shared/blob/ac8e049940d9bdda6bdb0368d20ceeb4ebe924ce/docs/testing/s04-contact-retention-2026-10-12.md);
 that checkpoint is the evidence owner. Whole S04, independent audit/key and physical claims stay open.
 
 ### S04 control audit custody and joint recovery — source candidate, qualification pending
@@ -1045,7 +1045,7 @@ removes no original unknown request, holder, ciphertext, history or replay floor
 Idle maintenance validates complete audit custody even before its deadline and
 after audit retirement, never repairing missing or hostile SQL rows.
 Matching qualification of this joint candidate remains pending in the
-[contact checkpoint](../testing/s04-contact-retention-2026-10-12.md); the earlier
+[contact checkpoint](https://github.com/XPointLabs/deep-client-shared/blob/ac8e049940d9bdda6bdb0368d20ceeb4ebe924ce/docs/testing/s04-contact-retention-2026-10-12.md); the earlier
 53-case foundation does not qualify these changed inputs. Preclaim cancellation,
 independent object-key retirement, whole S04 and physical E2E remain open.
 
@@ -1064,7 +1064,7 @@ Only completed key destruction permits the existing protected Application plan
 to retire Initial payload and content-free audit. Its SQL selector is derived
 under the registered audit key, never a fabricated native scope. Earlier source
 receipts do not qualify this cutover; current evidence/remaining matrix lives in
-the [contact checkpoint](../testing/s04-contact-retention-2026-10-12.md).
+the [contact checkpoint](https://github.com/XPointLabs/deep-client-shared/blob/ac8e049940d9bdda6bdb0368d20ceeb4ebe924ce/docs/testing/s04-contact-retention-2026-10-12.md).
 
 Pre-session stop projects trusted time as `bound + (sample - anchor)`, checking
 the elapsed subtraction and final addition separately after the existing
@@ -1099,7 +1099,7 @@ not a new generation, journal, wire or public Protocol allocation. It removes no
 payload/key/history, original request or replay floor; it proves no non-delivery
 and authorizes no successor. Full contact stopped payload/key/audit retention
 remains open. Matching source evidence is in the
-[S04 lifecycle checkpoint](../testing/s04-lifecycle-2026-10-11.md#initial--contactaccept-original-retry-expiry-before-recipient-refresh).
+[S04 lifecycle checkpoint](https://github.com/XPointLabs/deep-client-shared/blob/ac8e049940d9bdda6bdb0368d20ceeb4ebe924ce/docs/testing/s04-lifecycle-2026-10-11.md#initial--contactaccept-original-retry-expiry-before-recipient-refresh).
 
 ## Contact start same-command draft reuse — source candidate
 
@@ -1219,14 +1219,14 @@ and still disables pooling. This is an experimental performance setting, not
 a working-journal bound, schema/wire generation or cached authorization. Cipher,
 raw-key, durability/deletion policy and protected-floor checks are unchanged.
 Actual performance/mobile memory qualification and source acceptance remain
-pending in the [sustained-send checkpoint](../testing/s04-sustained-send-2026-10-12.md).
+pending in the [sustained-send checkpoint](https://github.com/XPointLabs/deep-client-shared/blob/ac8e049940d9bdda6bdb0368d20ceeb4ebe924ce/docs/testing/s04-sustained-send-2026-10-12.md).
 
 There is no production scheduler cleanup or floor unenrollment in this slice.
 Actual local prefix and outbox-only recovery are implemented, but plan registration and
 its narrow owner API are not sustained lifecycle activation. The encrypted
 native fixture closes/reopens real storage handles at each handover and retains
 acceptance replay and subsequent text; it is not physical device qualification.
-The [unused Deposit owner/recovery profile](../testing/s01-closed-deposit-retirement-2026-10-06.md#current-coupled-full--accepted-unused-deposit-profile)
+The [unused Deposit owner/recovery profile](https://github.com/XPointLabs/deep-client-shared/blob/ac8e049940d9bdda6bdb0368d20ceeb4ebe924ce/docs/testing/s01-closed-deposit-retirement-2026-10-06.md#current-coupled-full--accepted-unused-deposit-profile)
 is qualified on source25204bf/full706; it removes no known send/read/replay floor.
 Other terminal/audit/replay dispositions, outstanding
 receipt work and accepted-object/retained-route obligations must still close

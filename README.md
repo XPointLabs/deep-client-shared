@@ -1,5 +1,7 @@
 # Deep Client Shared
 
+Current architecture: [Deep / XPoint specification](../docs/architecture/README.md).
+
 Existing PKV2 pre-key files retain their original SQLCipher4 password-derived
 key and format. Opening within a verified current-account read computes that
 same PBKDF2-HMAC-SHA512 (256000 iterations, actual16-byte file salt,32-byte

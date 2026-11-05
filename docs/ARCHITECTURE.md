@@ -209,7 +209,7 @@ API, resource and downstream pin qualification is a separate gate. Historically
 named namespaces may contain current neutral primitives without restoring a
 retired identity or application owner.
 
-The [workspace audit](../../docs/architecture/ARCHITECTURE-AUDIT-2026-10-03.md) records the
+The [current specification](../../docs/architecture/README.md) records the
 cross-repository assessment. The
 [implementation plan](../../docs/architecture/IMPLEMENTATION-PLAN-V1.md)
 owns the sequence and acceptance gates. Dated notes below record individual
@@ -252,7 +252,7 @@ a changed root leaves the request pending instead of adopting a winner. This
 is an ordering correction under DR-0056/0081, not renewal or compaction. It
 preserves the current journal format, replay counters and late exact-MAU checks.
 Coverage and remaining lifecycle gates are recorded in the
-[send preflight checkpoint](testing/s01-send-preflight-2026-10-03.md).
+[send preflight checkpoint](https://github.com/XPointLabs/deep-client-shared/blob/ac8e049940d9bdda6bdb0368d20ceeb4ebe924ce/docs/testing/s01-send-preflight-2026-10-03.md).
 
 [DR-0081](../../docs/survival-program/decisions/DR-0081-did2-mailbox-selection-grant-clean-break.md)
 is the single normative owner of the replacement wire contract. The production
@@ -270,7 +270,7 @@ Store uses the first ranked replica even for a fallback attempt; Retrieve/ACK
 still support either replica. This changes no wire, guard policy, receipt quorum
 or exact retry bytes. Native writer enforcement and shipping activation remain
 separate gates; the local path evidence is recorded in the
-[writer checkpoint](testing/s03-mailbox-writer-2026-10-04.md).
+[writer checkpoint](https://github.com/XPointLabs/deep-client-shared/blob/ac8e049940d9bdda6bdb0368d20ceeb4ebe924ce/docs/testing/s03-mailbox-writer-2026-10-04.md).
 
 DMB1 schema8 and grant/send custody version2 reject older local state, including
 an empty old journal, without migration, repair, floor reset or key/nonce remint.
@@ -291,7 +291,7 @@ retry, route fallback or identity adapter. Generic IO, cancellation and unknown
 completion are propagated unchanged; they cannot become a before-forward
 rejection. Focused transport stubs prove mapping/no replay, not actual ingress
 or physical delivery. The physical checkpoint is
-[recorded separately](../../docs/DID2-PRODUCTION-DEVICE-CHECKPOINT-2026-10-03.md).
+[current specification](../../docs/architecture/README.md#acceptance).
 
 ## Typed DID2 genesis admission availability (2026-10-02)
 
@@ -388,7 +388,7 @@ another Retrieve or issuer request. Current DCA/XUR checks and unsupported
 PMT/device/delegation rollover still reject. This is not background scheduling,
 dependency-closed last-path cleanup, a matching full or physical acceptance.
 The focused source observation is in the
-[S01 checkpoint](testing/s01-idle-mailbox-floors-2026-10-09.md#publication-promotion-preserves-original-read-custody).
+[S01 checkpoint](https://github.com/XPointLabs/deep-client-shared/blob/ac8e049940d9bdda6bdb0368d20ceeb4ebe924ce/docs/testing/s01-idle-mailbox-floors-2026-10-09.md#publication-promotion-preserves-original-read-custody).
 
 ## Retired identity consumer cutover (2026-10-02)
 
@@ -434,7 +434,7 @@ automatic resend or replacement on unknown outcome. Old isolated QA instances
 require explicit reset; physical and final batch gates remain separate.
 Native connected unknown-Store and before/after-completion crash/reopen tests
 passed with the existing deadlines and original exact request; see
-[SPRINT-HISTORY](../../docs/SPRINT-HISTORY.md). No device claim follows from this.
+[current specification](../../docs/NEXT-SPRINT.md). No device claim follows from this.
 
 ## Application/mailbox random-key generation (2026-10-02)
 
@@ -461,7 +461,7 @@ Local start-operation metadata enables original-intent reconciliation, not trust
 The connected native vertical now calls these business commands and verifies
 actual reverse Accept and subsequent text receive, semantic interruption, exact
 retry after lost ACK and empty next poll. Exact evidence belongs to
-[SPRINT-HISTORY](../../docs/SPRINT-HISTORY.md). The signed in-process fixture is
+[current specification](../../docs/NEXT-SPRINT.md). The signed in-process fixture is
 not socket/device, remote BLOB or governed-group evidence. Full API/graph review,
 consumer repins and live/device activation remain open.
 
@@ -477,7 +477,7 @@ history. Existing local identity restrictions remain; this is not permission to
 ignore a revoked/suspicious account. Authenticated local availability follows
 the [normative owner](../../docs/architecture/TRANSPORT-NEUTRAL-MESSAGING.md#31-local-availability-и-delivery-lifecycle).
 Exact local tests and unqualified scopes are in the
-[checkpoint](testing/s07-local-history-2026-10-04.md).
+[checkpoint](https://github.com/XPointLabs/deep-client-shared/blob/ac8e049940d9bdda6bdb0368d20ceeb4ebe924ce/docs/testing/s07-local-history-2026-10-04.md).
 
 
 ## Current mailbox issuer and grant evidence
@@ -524,7 +524,7 @@ The owner derives its scope from the actual retired sender source and protected
 catalog; it must not dispatch caller-supplied DPH2 or use an ordinary-send fallback.
 The connected local initial Store/receipt/Hello/ACK plus text Store/Retrieve
 recovery checkpoint has passed; see the exact current evidence in
-[SPRINT-HISTORY](../../docs/SPRINT-HISTORY.md). This is not live/device delivery.
+[current specification](../../docs/NEXT-SPRINT.md). This is not live/device delivery.
 The initial preview uses Protocol's committed-recipient factory under
 [DR-0061](../../docs/survival-program/decisions/DR-0061-did2-committed-claim-recipient-verification.md),
 not its current initiator factory. A delayed committed allocation still requires
@@ -1519,7 +1519,7 @@ request author and ordinary result/restore consumers use the same commitment.
 Old requests are rejected rather than reminted. Rebuild/repin all consumers
 together; this source change does not reset account/node keys, provision a
 retained issuer or activate a shipping carrier. See the
-[bounded checkpoint](testing/s01-exact-request-binding-2026-10-07.md).
+[bounded checkpoint](https://github.com/XPointLabs/deep-client-shared/blob/ac8e049940d9bdda6bdb0368d20ceeb4ebe924ce/docs/testing/s01-exact-request-binding-2026-10-07.md).
 
 The internal `ReadOwnPrivateContactMailboxRouteAsync` drafts private reply
 metadata only from the actual phase-7 own publication under the account lease

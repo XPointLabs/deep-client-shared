@@ -1,7 +1,7 @@
 # Owned idle mailbox counter retirement
 
 Owner: Mr. X, delegated architecture authority. Current private S01 API/layout
-under [DR-0105](../../../docs/survival-program/decisions/DR-0105-idle-mailbox-counter-retirement.md).
+under the [held-selection contract](#held-selection-and-exact-dependencies).
 Semantics remain solely in
 [TRANSPORT-NEUTRAL-MESSAGING §8.4](../../../docs/architecture/TRANSPORT-NEUTRAL-MESSAGING.md#84-owned-attempt-settlement-renewal-and-retirement).
 This is not an acquisition/object-path retirement, runtime scheduler or device
@@ -115,4 +115,4 @@ cannot become current from a missing floor; dispatch still verifies current
 host/issuer/revocation/holder/route before reserving a new request.
 
 Source qualification and exact run receipts belong to
-[the checkpoint](../testing/s01-idle-mailbox-floors-2026-10-09.md), not this contract.
+[the checkpoint](https://github.com/XPointLabs/deep-client-shared/blob/ac8e049940d9bdda6bdb0368d20ceeb4ebe924ce/docs/testing/s01-idle-mailbox-floors-2026-10-09.md), not this contract.
