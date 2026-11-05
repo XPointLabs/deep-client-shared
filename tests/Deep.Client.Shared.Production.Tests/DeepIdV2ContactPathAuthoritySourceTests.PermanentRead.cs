@@ -4,6 +4,7 @@ using System.Text;
 using Deep.Client.Shared.Services.ContactV1;
 using Deep.Client.Shared.Services.ContactV2;
 using Deep.Client.Shared.Services.XPointNetworkV1;
+using Deep.Protocol.AccountDirectoryV1;
 using Deep.Protocol.ContactV1;
 using Deep.Protocol.ContactV2;
 using Deep.Protocol.XPointNetworkV1;
@@ -21,6 +22,8 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
 
     private sealed partial class Fixture
     {
+        private Action<DeepIdV2DirectoryProofWireRequest>? OnPermanentReadProofRequest;
+
         internal async Task CheckPermanentReadBusinessAsync()
         {
             var intent = Bytes(32, 0xc5);
@@ -38,10 +41,25 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             var source = Source(reader);
             var transport = new SyntheticPermanentRead(this, source, replicas.ExactPublication);
             var before = ProofRequests;
-            var resolved = await reader.ResolvePermanentContactAsync(address, source, transport);
+            var queries = new List<DeepIdV2DirectoryProofWireRequest>();
+            OnPermanentReadProofRequest = queries.Add;
+            VerifiedDeepIdV2PermanentContactResolveClosure resolved;
+            try { resolved = await reader.ResolvePermanentContactAsync(address, source, transport); }
+            finally { OnPermanentReadProofRequest = null; }
             Assert.Equal(published.Closure.CanonicalBytes.ToArray(), resolved.Contact.CanonicalBytes.ToArray());
             Assert.Equal(address.ExactDid2Hash.ToArray(), resolved.Candidate.ExactDid2.RecordHash.ToArray());
-            Assert.True(ProofRequests >= before + 4); // own, path, own, independently fetched peer
+            // The owned transport borrows the already verified network for
+            // placement. Authenticate two independent reader proofs and one
+            // publisher proof; no extra placement lookup or reused nonce.
+            Assert.Equal(before + 3, ProofRequests); Assert.Equal(3, queries.Count);
+            Assert.All(queries.Take(2), query =>
+            {
+                Assert.True(query.DirectoryLeafKey.Span.SequenceEqual(peerCheckpoint!.Checkpoint.DirectoryLeafKey.Span));
+                Assert.True(query.DeepId.CanonicalBytes.Span.SequenceEqual(peerCheckpoint!.Binding.DeepId.CanonicalBytes.Span));
+            });
+            Assert.True(queries[2].DirectoryLeafKey.Span.SequenceEqual(checkpoint.Checkpoint.DirectoryLeafKey.Span));
+            Assert.True(queries[2].DeepId.CanonicalBytes.Span.SequenceEqual(checkpoint.Binding.DeepId.CanonicalBytes.Span));
+            Assert.Equal(3, queries.Select(query => Convert.ToHexString(query.Nonce.Span)).Distinct(StringComparer.Ordinal).Count());
             Assert.Equal(1, transport.Calls); // no automatic second read
             Assert.False(await reader.HasOwnStagedPreKeyInventoryAsync()); // resolution does not create keys/session/acceptance
             transport.CorruptReceipt = true;

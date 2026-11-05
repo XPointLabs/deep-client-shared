@@ -200,4 +200,19 @@ public sealed partial class DeepIdV2AccountService
         ArgumentNullException.ThrowIfNull(conversation);
         return ListOwnMessagingMessagesAsync(conversation.Scope, ct);
     }
+    /// <summary>Reads a bounded newest-first page from the actual authenticated local conversation history.</summary>
+    /// <param name="conversation">The exact initialized owned conversation.</param>
+    /// <param name="maximumItems">A page size from 1 through 100.</param>
+    /// <param name="ct">Cancellation for the local read.</param>
+    /// <returns>At most the requested number of authenticated messages, newest first.</returns>
+    public async Task<IReadOnlyList<DirectMessageCreateSnapshot>> ListRecentMessagesAsync(DeepIdV2Conversation conversation,
+        int maximumItems = 20, CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(conversation);
+        if (maximumItems is < 1 or > 100) throw new ArgumentOutOfRangeException(nameof(maximumItems));
+        using var verifier = OpenVerifier();
+        var messages = await owner.ListMessagingMessagesAsync(TrustedUnixSeconds(), verifier, conversation.Scope, ct, maximumItems).ConfigureAwait(false);
+        return messages.Reverse().ToArray();
+    }
+
 }

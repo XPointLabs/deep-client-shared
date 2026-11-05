@@ -200,3 +200,18 @@ dotnet test Deep.Client.Shared.Production.slnx --configuration Release -m:1
 ```
 
 See [`AGENTS.md`](AGENTS.md) for repository boundaries and test requirements.
+
+`ReceiveOwnMailboxAsync` processes the same authenticated bounded mailbox page
+and native/semantic receive commits as ordinary synchronization, then returns
+before independent ACK acquisition. The existing protected read journal owns
+the exact pending page across disposal/crash; subsequent
+`SynchronizeOwnMailboxAsync` reopens that page and performs all original current
+authority, native handoff, signing, transport and quorum checks. This API starts
+no detached work. Hosts must drain pending ACK explicitly; an additional receive
+resumes the retained page instead of advancing past it. The result exposes only
+counts, `HasMore` and `AcknowledgementPending`, with no descriptor or ACK inputs.
+`ListRecentMessagesAsync` and `ListRecentGroupMessagesAsync` return 1..100 newest
+messages first (default20) from ordinary authenticated local history, including
+after reopen while the exact page remains pending. Existing listing contracts
+are unchanged. Bounded selection does not waive the account, catalog, reconciled
+native floor, group/native binding or application authentication checks.

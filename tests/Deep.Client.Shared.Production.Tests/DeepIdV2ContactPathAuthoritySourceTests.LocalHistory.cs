@@ -40,10 +40,15 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                     var message = Assert.Single(await account.ListMessagesAsync(snapshot.Conversation));
                     Assert.Equal(expectedText, message.Text);
                     Assert.Equal(scope.IsInitiator, message.IsLocalAuthor);
+                    Assert.Equal(message, Assert.Single(await account.ListRecentMessagesAsync(snapshot.Conversation, 1)));
+                    await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() => account.ListRecentMessagesAsync(snapshot.Conversation, 0));
+                    await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() => account.ListRecentMessagesAsync(snapshot.Conversation, 101));
                     var foreign = scope.IsInitiator ? ReopenGrantReader() : ReopenAccount();
                     await Assert.ThrowsAsync<CryptographicException>(() => foreign.ListMessagesAsync(snapshot.Conversation));
+                    await Assert.ThrowsAsync<CryptographicException>(() => foreign.ListRecentMessagesAsync(snapshot.Conversation, 1));
                     using var cancelled = new CancellationTokenSource(); cancelled.Cancel();
                     await Assert.ThrowsAnyAsync<OperationCanceledException>(() => account.ListMessagesAsync(snapshot.Conversation, cancelled.Token));
+                    await Assert.ThrowsAnyAsync<OperationCanceledException>(() => account.ListRecentMessagesAsync(snapshot.Conversation, 1, cancelled.Token));
                 }
                 Assert.Equal(requests, ProofRequests);
                 // Missing protected peer custody is not treated as an empty
@@ -62,6 +67,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                     await Assert.ThrowsAsync<InvalidDataException>(() => account.ListConversationsAsync());
                     await Assert.ThrowsAsync<InvalidDataException>(() => account.GetConversationAsync(handle.ConversationId));
                     await Assert.ThrowsAsync<InvalidDataException>(() => account.ListMessagesAsync(handle));
+                    await Assert.ThrowsAsync<InvalidDataException>(() => account.ListRecentMessagesAsync(handle, 1));
                     using var absent = await peerStorage.ReadOwnedAsync(slot); Assert.Null(absent);
                 }
                 finally

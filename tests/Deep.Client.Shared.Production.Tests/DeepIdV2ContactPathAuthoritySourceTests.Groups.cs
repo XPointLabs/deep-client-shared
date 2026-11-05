@@ -87,6 +87,11 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         Assert.Equal(0, Assert.Single(await fixture.Accounts.ListGroupsAsync()).LocalMessageCommands);
         Assert.Empty(await fixture.Accounts.ListGroupMessagesAsync(group));
         Assert.Empty(await fixture.AccountsForPeer().ListGroupMessagesAsync(group));
+        Assert.Empty(await fixture.Accounts.ListRecentGroupMessagesAsync(group, 1));
+        Assert.Empty(await fixture.AccountsForPeer().ListRecentGroupMessagesAsync(group, 1));
+        await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() => fixture.Accounts.ListRecentGroupMessagesAsync(group, 0));
+        await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() => fixture.Accounts.ListRecentGroupMessagesAsync(group, 101));
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => fixture.Accounts.ListRecentGroupMessagesAsync(group, 1, new CancellationToken(true)));
         Assert.True(hostileChunkChecked);
         var retainedBatch = await fixture.ReadGroupBatch(alice, group);
         try {

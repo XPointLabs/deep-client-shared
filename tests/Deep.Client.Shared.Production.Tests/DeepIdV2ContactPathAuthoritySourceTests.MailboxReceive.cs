@@ -16,6 +16,11 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
 {
     [Fact]
     [Trait("RequiresApprovedMlKemRuntime", "true")]
+    public async Task Did2OwnedMailboxReceive_DurableSplitAllowsColdRecentReadBeforeExactAckRecovery()
+        => await CheckOwnedMailboxReceiveAsync(false, false, splitReceive: true);
+
+    [Fact]
+    [Trait("RequiresApprovedMlKemRuntime", "true")]
     public async Task Did2OwnedMailboxReceive_AutomaticRecoveryKeepsExactLostAckAndSingleSemanticEvent()
         => await CheckOwnedMailboxReceiveAsync(false, false, automaticAck: true);
     [Theory]
@@ -179,12 +184,12 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
     }
 
     private static async Task CheckOwnedMailboxReceiveAsync(bool selectedSuccessor, bool renewPublicationDuringAck,
-        bool authorityRollover = false, bool carriageRenewal = false, bool automaticAck = false)
+        bool authorityRollover = false, bool carriageRenewal = false, bool automaticAck = false, bool splitReceive = false)
     {
         // Actual PQ accounts, committed DPE2/ratchet, SQLCipher, protected page,
         // materialization and signed ACK. In-process issuer/terminal and signed
         // fixture time: NOT socket/device or a remote attachment transfer.
-        await using var fixture = await Fixture.CreateAsync(withPeer: true, longMailboxWindow: true, encryptedStorage: carriageRenewal,
+        await using var fixture = await Fixture.CreateAsync(withPeer: true, longMailboxWindow: true, encryptedStorage: carriageRenewal || splitReceive,
             initialMailboxAuthorityExpiry: authorityRollover ? 2_000UL : null);
         if (authorityRollover) await fixture.AdvanceCurrentRoutingAuthorityAsync();
         if (renewPublicationDuringAck) await fixture.SeedShortPermanentProposalAsync(validitySeconds: 800);
@@ -306,6 +311,36 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         Assert.True(hitSemanticFault); Assert.Equal(1, terminal.RetrieveCalls); Assert.Equal(0, terminal.AckCalls);
         Assert.DoesNotContain(deliveryEvents.Events, item => item.Phase == 3);
         using (var read = await fixture.ReadPeerMailboxReads()) { Assert.Equal(4, read.Phase); Assert.NotEmpty(read.Active!.Page); }
+        if (splitReceive)
+        {
+            byte[] originalPage;
+            using (var read = await fixture.ReadPeerMailboxReads()) originalPage = read.Active!.Page.ToArray();
+            try
+            {
+                for (var replay = 0; replay < 2; replay++)
+                {
+                    // Reopened actual account and SQLCipher owner; no event or
+                    // in-memory descriptor supplies ordinary reader plaintext.
+                    var account = fixture.ReopenGrantReader();
+                    var received = await account.ReceiveOwnMailboxAsync(fixture.GrantReaderSource(account), grants, terminal);
+                    Assert.Equal(1, received.ProcessedEnvelopes); Assert.True(received.AcknowledgementPending);
+                    Assert.False(received.HasMore); Assert.Equal(0, terminal.AckCalls);
+                    Assert.Equal(1, terminal.RetrieveCalls);
+                    using (var retained = await fixture.ReadPeerMailboxReads())
+                    {
+                        Assert.Equal(4, retained.Phase); Assert.Equal(originalPage, retained.Active!.Page);
+                        Assert.Equal(0UL, retained.Active.AckCounter); Assert.Empty(retained.Active.AckBody);
+                    }
+                    var reader = fixture.ReopenGrantReader();
+                    var conversation = Assert.Single(await reader.ListConversationsAsync()).Conversation;
+                    var recent = Assert.Single(await reader.ListRecentMessagesAsync(conversation, 1));
+                    Assert.Equal("Owned Retrieve \u2192 semantic inbox \u2192 ACK", recent.Text); Assert.False(recent.IsLocalAuthor);
+                    Assert.Equal(0, terminal.AckCalls);
+                    Assert.Single(await reader.ListMessagesAsync(conversation));
+                }
+            }
+            finally { CryptographicOperations.ZeroMemory(originalPage); }
+        }
         DeepIdV2MailboxSynchronizationResult completed;
         if (automaticAck)
         {

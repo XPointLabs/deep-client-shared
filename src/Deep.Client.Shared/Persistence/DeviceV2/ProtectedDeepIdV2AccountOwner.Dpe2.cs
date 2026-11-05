@@ -47,7 +47,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
     }
 
     internal async Task<IReadOnlyList<DirectMessageCreateSnapshot>> ListMessagingMessagesAsync(
-        ulong trustedUnixSeconds, IDeepMlDsa65Verifier verifier, Did2MessagingSessionScope scope, CancellationToken ct)
+        ulong trustedUnixSeconds, IDeepMlDsa65Verifier verifier, Did2MessagingSessionScope scope, CancellationToken ct, int maximumItems = 100)
     {
         ArgumentNullException.ThrowIfNull(scope);
         using var held = await lease.AcquireAsync(ct).ConfigureAwait(false);
@@ -59,7 +59,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             storage, sqlStatePath, current, held, ct).ConfigureAwait(false);
         var messages = await application.ListDirectMessageCreatesAsync(current.AccountId,
             System.Buffers.Binary.BinaryPrimitives.ReadUInt64BigEndian(scope.Exact[84..]),
-            scope.Conversation.ToArray(), cancellationToken: ct).ConfigureAwait(false);
+            scope.Conversation.ToArray(), maximumItems, cancellationToken: ct).ConfigureAwait(false);
         ct.ThrowIfCancellationRequested(); held.RequireActive();
         return messages;
     }

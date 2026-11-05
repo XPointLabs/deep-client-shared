@@ -17,6 +17,19 @@ public sealed class DeepIdV2MailboxSynchronizationResult
     public int DurableTombstones { get; }
 }
 
+/// <summary>A durably received page whose exact pending ACK remains owned by the protected mailbox journal.</summary>
+public sealed class DeepIdV2MailboxReceiveResult
+{
+    internal DeepIdV2MailboxReceiveResult(int processedEnvelopes, bool hasMore)
+    { ProcessedEnvelopes = processedEnvelopes; HasMore = hasMore; }
+    /// <summary>Number of committed envelopes, including idempotent replays and controls.</summary>
+    public int ProcessedEnvelopes { get; }
+    /// <summary>Whether the captured page reports further mailbox items after its pending ACK.</summary>
+    public bool HasMore { get; }
+    /// <summary>Whether ordinary mailbox synchronization must finish the retained exact page's ACK.</summary>
+    public bool AcknowledgementPending => ProcessedEnvelopes != 0;
+}
+
 public sealed partial class DeepIdV2AccountService
 {
     internal const int OwnedMailboxMaximumMessagesWithoutPqInjection = 32;
@@ -64,10 +77,32 @@ public sealed partial class DeepIdV2AccountService
     public Task<DeepIdV2MailboxSynchronizationResult> SynchronizeOwnMailboxAsync(DeepIdV2ContactPathAuthoritySource source, CancellationToken ct = default) =>
         SynchronizeOwnMailboxWithRecoveryAsync(source, new Did2MailboxGrantOnionTransport(source), new Did2OwnedMailboxOnionTransportFactory(), ct);
 
+    /// <summary>Authenticates and durably materializes one owned mailbox page, then releases
+    /// ownership before network ACK acquisition. A later ordinary synchronization resumes
+    /// the exact protected page and independently verifies its ACK; no detached work is started.</summary>
+    /// <param name="source">The current account's authenticated network composition.</param>
+    /// <param name="ct">Cancellation for this bounded receive operation.</param>
+    /// <returns>The committed page count and whether its durable ACK remains pending.</returns>
+    public Task<DeepIdV2MailboxReceiveResult> ReceiveOwnMailboxAsync(DeepIdV2ContactPathAuthoritySource source, CancellationToken ct = default) =>
+        ReceiveOwnMailboxAsync(source, new Did2MailboxGrantOnionTransport(source), new Did2OwnedMailboxOnionTransportFactory(), ct);
+
+    internal async Task<DeepIdV2MailboxReceiveResult> ReceiveOwnMailboxAsync(DeepIdV2ContactPathAuthoritySource source,
+        IDid2MailboxGrantTransport grants, IDid2OwnedMailboxTransportFactory transport, CancellationToken ct = default)
+    {
+        var result = await OwnedMailboxRecovery.RunAsync(() => ProcessOwnMailboxPageAsync(source, grants, transport, false, ct),
+            () => source.DiscardUncapturedAuthorityAsync(ct),
+            () => Interlocked.Increment(ref mailboxResumes), () => Interlocked.Increment(ref recoveryLeaseWaits), ct).ConfigureAwait(false);
+        return new(result.ProcessedEnvelopes, result.HasMore);
+    }
+
     // Actual connected business entry; callers supply no page, mailbox selector,
     // signer, endpoint proof, semantic success flag or ACK list.
-    internal async Task<DeepIdV2MailboxSynchronizationResult> SynchronizeOwnMailboxAsync(DeepIdV2ContactPathAuthoritySource source,
-        IDid2MailboxGrantTransport grants, IDid2OwnedMailboxTransportFactory transport, CancellationToken ct = default)
+    internal Task<DeepIdV2MailboxSynchronizationResult> SynchronizeOwnMailboxAsync(DeepIdV2ContactPathAuthoritySource source,
+        IDid2MailboxGrantTransport grants, IDid2OwnedMailboxTransportFactory transport, CancellationToken ct = default) =>
+        ProcessOwnMailboxPageAsync(source, grants, transport, true, ct);
+
+    private async Task<DeepIdV2MailboxSynchronizationResult> ProcessOwnMailboxPageAsync(DeepIdV2ContactPathAuthoritySource source,
+        IDid2MailboxGrantTransport grants, IDid2OwnedMailboxTransportFactory transport, bool acknowledge, CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(source); ArgumentNullException.ThrowIfNull(grants); ArgumentNullException.ThrowIfNull(transport);
         source.RequireAccountOwner(this);
@@ -106,6 +141,11 @@ public sealed partial class DeepIdV2AccountService
             var name = Convert.ToHexString(scope.Hash);
             scopes.TryAdd(name, scope);
         }
+        // Retrieve committed the exact page before any receive, and each receive
+        // committed its authenticated semantic history. Disposing this private
+        // descriptor never retires that page. Ordinary sync reopens/revalidates
+        // it and reconstructs ACK authority independently, including after crash.
+        if (!acknowledge) return new(page.Items.Count, page.HasMore, 0);
         // Receive/materialization can do cold native and SQL work for every
         // item. Fetch the ACK endpoint set only after the whole batch, so a
         // first item's proof is not needlessly aged by later receive commits.

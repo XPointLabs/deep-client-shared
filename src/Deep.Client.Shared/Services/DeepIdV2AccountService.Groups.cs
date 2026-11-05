@@ -19,6 +19,24 @@ public sealed partial class DeepIdV2AccountService
         finally { CryptographicOperations.ZeroMemory(selected); }
     }
 
+    /// <summary>Reads a bounded newest-first page of actual authenticated local group history.</summary>
+    /// <param name="group">The exact owned group identifier.</param>
+    /// <param name="maximumItems">A page size from 1 through 100.</param>
+    /// <param name="ct">Cancellation for the local read.</param>
+    /// <returns>At most the requested number of authenticated group messages, newest first.</returns>
+    public async Task<IReadOnlyList<DeepIdV2GroupMessageSnapshot>> ListRecentGroupMessagesAsync(ReadOnlyMemory<byte> group,
+        int maximumItems = 20, CancellationToken ct = default)
+    {
+        if (maximumItems is < 1 or > 100) throw new ArgumentOutOfRangeException(nameof(maximumItems));
+        ProtectedDph2PreClaimJournal.RequireIntent(group.Span); var selected = group.ToArray();
+        try
+        {
+            ProtectedDph2PreClaimJournal.RequireIntent(selected); using var verifier = OpenVerifier();
+            return await owner.ListGroupMessagesAsync(TrustedUnixSeconds(), verifier, selected, ct, maximumItems).ConfigureAwait(false);
+        }
+        finally { CryptographicOperations.ZeroMemory(selected); }
+    }
+
     public async Task<string> CreateGroupAsync(string name, DeepIdV2ContactPathAuthoritySource source, CancellationToken ct = default)
     {
         using var reads = source.OpenCommandReadScope(); source = reads.Source;

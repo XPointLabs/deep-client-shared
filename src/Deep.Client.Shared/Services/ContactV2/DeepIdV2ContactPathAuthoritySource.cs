@@ -509,19 +509,57 @@ public sealed partial class DeepIdV2ContactPathAuthoritySource :
         await gate.WaitAsync(ct).ConfigureAwait(false);
         try
         {
-            var own = await VerifyCurrentNetworkCoreAsync(ct).ConfigureAwait(false);
-            var peer = await accounts.FetchContactPeerProofAsync(candidate, proofs, own.Authority, ct).ConfigureAwait(false);
-            var contact = await DeepIdV2PermanentContactResolveVerifier.VerifyAsync(candidate,
-                peer, own.Network, own.Authority, trustedTime, ct).ConfigureAwait(false);
-            await proofs.RequireStillFreshAsync(peer, own.Authority, ct).ConfigureAwait(false);
-            await proofs.RequireStillFreshAsync(own.Proof, own.Authority, ct).ConfigureAwait(false);
-            var floor = await networkHistory.ReadHistoryAsync(ct).ConfigureAwait(false);
-            if (floor is null || floor.Snapshot.ForkLatched ||
-                !Same(floor.Snapshot.ProtectedLkg, own.Network.ProtectedLkg) ||
-                !Fixed(floor.ExactHistory.Span, OnionNetworkProtectedHistoryCodec.Encode(own.Network)))
-                throw new CryptographicException("Permanent resolve no longer binds owned network custody.");
-            await contact.Route.EnsureCurrentAsync(ct).ConfigureAwait(false);
-            ct.ThrowIfCancellationRequested(); return new(own, contact);
+            OnionMonotonicReading? reacquisitionStart = null;
+            for (var acquisition = 0; acquisition < 2; acquisition++)
+            {
+                var own = await VerifyCurrentNetworkCoreAsync(ct).ConfigureAwait(false);
+                var peer = await accounts.FetchContactPeerProofAsync(candidate, proofs, own.Authority, ct).ConfigureAwait(false);
+                VerifiedDeepIdV2PermanentContactResolveClosure contact;
+                try
+                {
+                    contact = await DeepIdV2PermanentContactResolveVerifier.VerifyAsync(candidate,
+                        peer, own.Network, own.Authority, trustedTime, ct).ConfigureAwait(false);
+                }
+                catch (DeepIdV2RouteContextException error) when (
+                    acquisition == 0 && error.Check == DeepIdV2RouteContextCheck.DirectoryHead &&
+                    peer.NextProtectedLkg.LogGeneration > own.Proof.NextProtectedLkg.LogGeneration)
+                {
+                    // Only a genuinely authenticated strictly newer directory head
+                    // may restart this read-only phase. Never renew the candidate,
+                    // replay a business command, or preserve a captured authority.
+                    await proofs.RequireStillFreshAsync(peer, own.Authority, ct).ConfigureAwait(false);
+                    var current = await clock.ReadAsync(ct).ConfigureAwait(false);
+                    if (!own.Proof.IsCurrentAtMonotonic(current.BootId.Span, current.SampleSeconds) ||
+                        !peer.IsCurrentAtMonotonic(current.BootId.Span, current.SampleSeconds))
+                        throw new CryptographicException("Permanent contact reacquisition no longer has current clock continuity.", error);
+                    var custody = await networkHistory.ReadHistoryAsync(ct).ConfigureAwait(false);
+                    if (custody is null || custody.Snapshot.ForkLatched ||
+                        !Same(custody.Snapshot.ProtectedLkg, own.Network.ProtectedLkg) ||
+                        !Fixed(custody.ExactHistory.Span, OnionNetworkProtectedHistoryCodec.Encode(own.Network)))
+                        throw new CryptographicException("Permanent contact reacquisition no longer binds owned network custody.", error);
+                    own.Network.EnsureCurrent(); ct.ThrowIfCancellationRequested();
+                    reacquisitionStart = current;
+                    commandReads?.ResetUncapturedPair();
+                    continue;
+                }
+                await proofs.RequireStillFreshAsync(peer, own.Authority, ct).ConfigureAwait(false);
+                await proofs.RequireStillFreshAsync(own.Proof, own.Authority, ct).ConfigureAwait(false);
+                var floor = await networkHistory.ReadHistoryAsync(ct).ConfigureAwait(false);
+                if (floor is null || floor.Snapshot.ForkLatched ||
+                    !Same(floor.Snapshot.ProtectedLkg, own.Network.ProtectedLkg) ||
+                    !Fixed(floor.ExactHistory.Span, OnionNetworkProtectedHistoryCodec.Encode(own.Network)))
+                    throw new CryptographicException("Permanent resolve no longer binds owned network custody.");
+                if (reacquisitionStart is { } started)
+                {
+                    var released = await clock.ReadAsync(ct).ConfigureAwait(false);
+                    if (!Fixed(started.BootId.Span, released.BootId.Span) ||
+                        released.SampleSeconds < started.SampleSeconds)
+                        throw new CryptographicException("Permanent contact reacquisition crossed monotonic continuity.");
+                }
+                await contact.Route.EnsureCurrentAsync(ct).ConfigureAwait(false);
+                ct.ThrowIfCancellationRequested(); return new(own, contact);
+            }
+            throw new InvalidOperationException("Bounded permanent contact acquisition did not produce a coherent context.");
         }
         finally { gate.Release(); }
     }

@@ -3169,6 +3169,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             { TransientProofFailures--; return new(HttpStatusCode.ServiceUnavailable) { RequestMessage = request }; }
             var query = DeepIdV2DirectoryProofWireCodec.DecodeRequest(
                 await request.Content!.ReadAsByteArrayAsync(cancellationToken));
+            OnPermanentReadProofRequest?.Invoke(query);
             if (RejectContactRetryProof(query.DirectoryLeafKey.Span))
                 return new(HttpStatusCode.ServiceUnavailable) { RequestMessage = request };
             var floor = RouteRequestHistoryHeads().SingleOrDefault(value =>

@@ -34,13 +34,18 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
     }
 
     internal async Task<IReadOnlyList<DeepIdV2GroupMessageSnapshot>> ListGroupMessagesAsync(ulong seconds, IDeepMlDsa65Verifier verifier,
-        ReadOnlyMemory<byte> groupId, CancellationToken ct)
+        ReadOnlyMemory<byte> groupId, CancellationToken ct, int? maximumItems = null)
     {
+        if (maximumItems is < 1 or > 100) throw new ArgumentOutOfRangeException(nameof(maximumItems));
         using var held = await lease.AcquireAsync(ct).ConfigureAwait(false);
         using var current = await RequireCurrentUnderLeaseAsync(seconds, verifier, ct).ConfigureAwait(false);
         using var root = await OpenGroupsUnderLeaseAsync(current, ct).ConfigureAwait(false); _ = root.State.Find(groupId.Span);
-        var selected = root.State.Messages.Where(item => item.Group.AsSpan().SequenceEqual(groupId.Span))
-            .Select((item, index) => (Item: item, Index: index)).ToArray();
+        var messages = root.State.Messages.Where(item => item.Group.AsSpan().SequenceEqual(groupId.Span));
+        // Select from the authenticated group root before opening native scopes.
+        // Full history keeps its original order; recent pages visit only the
+        // selected newest operations, with the same native snapshot checks below.
+        if (maximumItems is { } limit) messages = messages.Reverse().Take(limit);
+        var selected = messages.Select((item, index) => (Item: item, Index: index)).ToArray();
         var result = new DeepIdV2GroupMessageSnapshot[selected.Length];
         foreach (var byScope in selected.GroupBy(row => Convert.ToHexString(row.Item.Scope), StringComparer.Ordinal))
         {
