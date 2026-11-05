@@ -108,30 +108,58 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 throw new CryptographicException("Retained acquisition differs from this publication's exact private custody.");
             if (!ProtectedDid2MailboxGrantJournal.HasWinner(entry))
             {
-                using var signer = ReachabilityMailboxHolderAuthority.OpenRetainedRead(publication.Route, networkId,
-                    publication.Locator, publication.Capability, ProtectedDid2MailboxGrantJournal.Seed(entry), publication.RecheckAsync);
-                var request = await publication.Host.RestoreRetainedReadRequestAsync(publication.Route.ExactBytes,
-                    publication.Locator, publication.Capability, signer.Ed25519PublicKey,
-                    ProtectedDid2MailboxGrantJournal.Request(entry), ct).ConfigureAwait(false);
+                AuthoredMailboxGrantRequest request;
+                using (var signer = ReachabilityMailboxHolderAuthority.OpenRetainedRead(publication.Route, networkId,
+                    publication.Locator, publication.Capability, ProtectedDid2MailboxGrantJournal.Seed(entry), publication.RecheckAsync))
+                    request = await publication.Host.RestoreRetainedReadRequestAsync(publication.Route.ExactBytes,
+                        publication.Locator, publication.Capability, signer.Ed25519PublicKey,
+                        ProtectedDid2MailboxGrantJournal.Request(entry), ct).ConfigureAwait(false);
                 await publication.RecheckAsync(ct).ConfigureAwait(false);
-                using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct);
-                deadline.CancelAfter(TimeSpan.FromSeconds(30));
-                var custody = await SqliteDeepIdV2AccountGeneration.OpenBorrowedOnionCustodyAsync(storage, lease,
-                    sqlStatePath, current, source.AccountOwner, held, deadline.Token).ConfigureAwait(false);
-                var requestContext = await publication.Host.VerifyRetainedReadRequestAsync(request.ExactXmg2, deadline.Token).ConfigureAwait(false);
-                var dispatch = new Did2OwnedContactTransportContext(custody, fresh.Network, fresh.Authority, held, requestContext);
-                var response = await transport.AcquireRetainedReadAsync(request, dispatch, deadline.Token).AsTask()
-                    .WaitAsync(deadline.Token).ConfigureAwait(false);
-                if (response.Length != 510) throw new InvalidDataException("Retained-read result exceeds its exact bound.");
-                var verified = await publication.Host.VerifyRetainedReadSuccessAsync(publication.Route.ExactBytes,
-                    request.ExactXmg2, response, deadline.Token).ConfigureAwait(false);
-                await publication.RecheckAsync(deadline.Token).ConfigureAwait(false);
-                var next = ProtectedDid2MailboxGrantJournal.WithWinner(entry, verified.ExactXmc2.Span, networkId);
-                state.Entries[ProtectedDid2MailboxGrantJournal.Acquisition(entry)] = next;
-                CryptographicOperations.ZeroMemory(entry); entry = next;
-                state.Revision = checked(state.Revision + 1);
-                var adopted = await SaveMailboxGrantJournalAsync(state, snapshot, current.AccountId, instance, deadline.Token).ConfigureAwait(false);
-                CryptographicOperations.ZeroMemory(snapshot); snapshot = adopted;
+                byte[] response = [];
+                try
+                {
+                    using (var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct))
+                    {
+                        deadline.CancelAfter(TimeSpan.FromSeconds(30));
+#if DEEP_TEST_INTERNALS
+                        Did2MailboxInstallationTestHooks.ConfigureRetainedGrantTransport(deadline);
+#endif
+                        try
+                        {
+                            var borrowed = await SqliteDeepIdV2AccountGeneration.OpenBorrowedOnionCustodyAsync(storage, lease,
+                                sqlStatePath, current, source.AccountOwner, held, deadline.Token).ConfigureAwait(false);
+                            var custody = borrowed.RestrictToLifetime(deadline.Token);
+                            var requestContext = await publication.Host.VerifyRetainedReadRequestAsync(request.ExactXmg2, deadline.Token).ConfigureAwait(false);
+                            var dispatch = new Did2OwnedContactTransportContext(custody, fresh.Network, fresh.Authority, held, requestContext);
+                            var returned = await transport.AcquireRetainedReadAsync(request, dispatch, deadline.Token).AsTask()
+                                .WaitAsync(deadline.Token).ConfigureAwait(false);
+                            deadline.Token.ThrowIfCancellationRequested();
+                            if (returned.Length != 510) throw new InvalidDataException("Retained-read result exceeds its exact bound.");
+                            response = returned.ToArray();
+                            deadline.Token.ThrowIfCancellationRequested();
+                        }
+                        finally { deadline.Cancel(); }
+                    }
+#if DEEP_TEST_INTERNALS
+                    Did2MailboxInstallationTestHooks.Hit(Did2MailboxInstallationFailpoint.AfterRetainedGrantReplyCopied);
+#endif
+                    // The timely exact reply is owned locally. Revoke the courier
+                    // loan before a separate bounded, freshly authenticated adoption;
+                    // this does not renew the request, grant or transport deadline.
+                    using var adoption = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                    adoption.CancelAfter(TimeSpan.FromSeconds(30));
+                    adoption.Token.ThrowIfCancellationRequested();
+                    var verified = await publication.Host.VerifyRetainedReadSuccessAsync(publication.Route.ExactBytes,
+                        request.ExactXmg2, response, adoption.Token).ConfigureAwait(false);
+                    await publication.RecheckAsync(adoption.Token).ConfigureAwait(false);
+                    var next = ProtectedDid2MailboxGrantJournal.WithWinner(entry, verified.ExactXmc2.Span, networkId);
+                    state.Entries[ProtectedDid2MailboxGrantJournal.Acquisition(entry)] = next;
+                    CryptographicOperations.ZeroMemory(entry); entry = next;
+                    state.Revision = checked(state.Revision + 1);
+                    var adopted = await SaveMailboxGrantJournalAsync(state, snapshot, current.AccountId, instance, adoption.Token).ConfigureAwait(false);
+                    CryptographicOperations.ZeroMemory(snapshot); snapshot = adopted;
+                }
+                finally { CryptographicOperations.ZeroMemory(response); }
             }
             using var receivedRoot = await storage.ReadOwnedAsync(ProtectedDid2MailboxGrantJournal.Slot, ct).ConfigureAwait(false) ??
                 throw new CryptographicException("Retained-read winner disappeared before read-back.");

@@ -386,3 +386,30 @@ Historical failures are retained without waiver. Previously covered transitive
 cases remain mandatory in the canonical full gate. Retained target diagnostics,
 warm delivery/ACK measurements and full Shared qualification remain pending;
 this packet claims no target, warm, full or release qualification.
+
+## Retained grant reply and local adoption deadlines
+
+The true retained-read lane keeps its original 30-second transport budget. An
+exact bounded reply copied before transport cancellation is observed survives
+revocation of the courier context and its borrowed guard/entropy stores. Local
+current-authority verification and exact pending-winner CAS use a separate
+parent-cancellable 30-second resource budget; request/grant expiry and original
+custody remain unchanged ([DR0053](../../../docs/survival-program/decisions/DR-0053-did2-mailbox-grant-restart-custody.md),
+[DR0055](../../../docs/survival-program/decisions/DR-0055-did2-owned-mailbox-credential-installation.md)).
+
+- Build56 rejected two test async-assert analyzer errors; no tests ran. Builds57
+  and58 passed with zero warnings/errors and2202 unchanged source inputs each.
+- Qualification35 recorded12 passed/1 failed/0 skipped, native1,2344 unchanged
+  inputs (07:23:52.5675188Z–07:24:38.1630324Z,2026-11-05). The failed fixture
+  demanded an exact base cancellation-source type instead of .NET's linked
+  subclass. Its original rejected receipt remains intact.
+- After only that assertion correction, qualification36 selected the failed
+  `cancelParent: False` row exactly:1 passed/0 failed/0 skipped, native0,2344
+  unchanged inputs, accepted focused receipt (07:26:13.1585112Z–07:26:21.5987252Z).
+
+All13 distinct selected identities have passing evidence across q35/q36,
+including timely owned-copy/cold winner, revoked adapters, late transport,
+parent cancellation and existing signed-result/currentness refusals. Q35 is
+not an accepted13-case gate. Receipts are under the matching `artifacts/archive-resume-20261104-`
+build56/57/58 and qualification35/36 directories. No retained-target latency,
+warm measurement, full Shared or release qualification is claimed.

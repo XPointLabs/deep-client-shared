@@ -16,5 +16,5 @@ internal sealed class Did2OwnedContactTransportContext(
     // Loaned only by the original publication owner after the actual current
     // host verified this exact request's retained projection and live window.
     internal VerifiedMailboxRetainedReadRequestV2? RetainedReadRequest { get; } = retainedReadRequest;
-    internal void RequireActive() { held.RequireActive(); Network.EnsureCurrent(); }
+    internal void RequireActive() { Custody.RequireActive(); held.RequireActive(); Network.EnsureCurrent(); }
 }
