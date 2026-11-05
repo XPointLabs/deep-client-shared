@@ -229,6 +229,10 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 snapshot = root.Use(bytes => bytes.ToArray());
             guards.Add(ProtectedDid2ContactRouteJournal.Slot, SHA256.HashData(snapshot));
             using var state = ProtectedDid2ContactRouteJournal.Decode(snapshot, networkId, current.AccountId.Span, instance);
+            await ProtectedDid2ContactRouteJournal.HydrateAsync(storage, state, snapshot, networkId, current.AccountId, instance, ct,
+                selectedRoute: newRead is null ? originalRouteHash : default).ConfigureAwait(false);
+            foreach (var reference in state.Archived.Where(pair => state.Entries.ContainsKey(pair.Key)))
+                guards.Add(ProtectedDid2ContactRouteJournal.ArchiveSlot(instance, reference.Key), reference.Value.Hash.ToArray());
             var currentName = Convert.ToHexString(plan.Intent.Span);
             state.Entries.TryGetValue(currentName, out var entry);
             if (newRead is not null)

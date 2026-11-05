@@ -64,7 +64,13 @@ internal static partial class SqliteDeepIdV2AccountGeneration
         => EnsureCoreAsync(statePath, storage, networkId, accountId, displayName, genesis, false,
             ct, grammar, AccountAdmission.ExplicitArchiveEnrollment);
 
-    private enum AccountAdmission { Ordinary, ExplicitArchiveEnrollment }
+    internal static Task EnsureForPublicationArchiveEnrollmentAsync(string statePath, IDeepSecureStorage storage,
+        ReadOnlyMemory<byte> networkId, ReadOnlyMemory<byte> accountId, string displayName,
+        VerifiedDeepIdV2LocalGenesis genesis, CancellationToken ct, AccountRegistrationGrammar? grammar = null)
+        => EnsureCoreAsync(statePath, storage, networkId, accountId, displayName, genesis, false,
+            ct, grammar, AccountAdmission.ExplicitPublicationArchiveEnrollment);
+
+    private enum AccountAdmission { Ordinary, ExplicitArchiveEnrollment, ExplicitPublicationArchiveEnrollment }
 
     private static async Task EnsureCoreAsync(string statePath,
         IDeepSecureStorage storage, ReadOnlyMemory<byte> networkId,
@@ -248,7 +254,15 @@ internal static partial class SqliteDeepIdV2AccountGeneration
             using var attachmentState = attachments.Use(value => ProtectedDid2AttachmentJournal.Decode(
                 value, networkId.Span, accountId.Span, record.AsSpan(56, 32)));
             using var routes = journals[5] ?? throw new InvalidDataException("Protected route custody is absent; explicit local reset is required.");
-            routes.Use(value => { grammar.Validate(RegistrationGrammarKind.ContactRoutes, value, networkId.Span, accountId.Span, record.AsSpan(56, 32)); return true; });
+            if (admission == AccountAdmission.ExplicitPublicationArchiveEnrollment)
+            {
+                using var source = routes.Use(value => ProtectedDid2ContactRouteJournal.DecodeForEnrollment(value,
+                    networkId.Span, accountId.Span, record.AsSpan(56, 32)));
+            }
+            else routes.Use(value => { grammar.Validate(RegistrationGrammarKind.ContactRoutes, value, networkId.Span, accountId.Span, record.AsSpan(56, 32)); return true; });
+            if (routes.Use(value => value[0]) == ProtectedDid2ContactRouteJournal.Version)
+                await ProtectedDid2ContactRouteJournal.RequireArchiveCustodyAsync(storage, routes,
+                    networkId, accountId, record.AsMemory(56, 32), cancellationToken).ConfigureAwait(false);
             using var grants = journals[6] ?? throw new InvalidDataException("Protected mailbox holder custody is absent; explicit local reset is required.");
             grants.Use(value => { grammar.Validate(RegistrationGrammarKind.MailboxGrants, value, networkId.Span, accountId.Span, record.AsSpan(56, 32)); return true; });
             using var mailboxSends = journals[7] ?? throw new InvalidDataException("Protected mailbox send custody is absent; explicit local reset is required.");

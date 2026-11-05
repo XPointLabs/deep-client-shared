@@ -3281,12 +3281,19 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             IReadOnlyList<string> slots, CancellationToken ct = default) => inner.CompareAndDeleteAsync(guardSlot, expected, slots, ct);
 
         internal bool FailAfterPreKeySuccessorInsert { get; set; }
+        internal bool RejectPublicationArchiveInsert { get; set; }
+        internal bool StopAfterPublicationArchiveInsert { get; set; }
         internal Func<Task>? AfterPreKeySuccessorRead { get; set; }
         public async Task<bool> CompareExchangeAndInsertAsync(string slot, ReadOnlyMemory<byte> expected,
             ReadOnlyMemory<byte> replacement, IReadOnlyList<DeepSecureStorageWrite> insertions,
             CancellationToken ct = default)
         {
+            var publicationArchive = slot == ProtectedDid2ContactRouteJournal.Slot && insertions.Count > 0;
+            if (publicationArchive && RejectPublicationArchiveInsert)
+            { RejectPublicationArchiveInsert = false; return false; }
             var applied = await inner.CompareExchangeAndInsertAsync(slot, expected, replacement, insertions, ct);
+            if (applied && publicationArchive && StopAfterPublicationArchiveInsert)
+            { StopAfterPublicationArchiveInsert = false; throw new IOException("Injected stop after atomic publication archive custody."); }
             if (applied && slot == ProtectedPreKeyInventoryChain.TipSlot && FailAfterPreKeySuccessorInsert)
             {
                 FailAfterPreKeySuccessorInsert = false;

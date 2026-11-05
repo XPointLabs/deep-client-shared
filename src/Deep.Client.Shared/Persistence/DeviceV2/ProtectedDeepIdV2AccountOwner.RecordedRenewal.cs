@@ -80,6 +80,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 throw new CryptographicException("Recorded renewal origins changed their completed anchor.");
             using var journal=await storage.ReadOwnedAsync(ProtectedDid2ContactRouteJournal.Slot,ct).ConfigureAwait(false)??throw new InvalidDataException("Recorded renewal journal is absent.");
             using var state=journal.Use(bytes=>ProtectedDid2ContactRouteJournal.Decode(bytes,networkId,account.Span,instance));
+            await HydratePublicationArchiveAsync(state, journal, account, instance, ct, selectedIntent: Convert.ToHexString(latestNextIntent)).ConfigureAwait(false);
             ProtectedDid2ContactRouteJournal.Entry? completed=null;
             foreach(var locator in new[]{oldest.PermanentIntent.ToArray(),latestNextIntent})
             {

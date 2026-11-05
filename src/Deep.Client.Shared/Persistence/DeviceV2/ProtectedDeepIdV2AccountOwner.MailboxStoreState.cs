@@ -63,6 +63,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             throw new InvalidDataException("Mailbox state lost protected publication/retained-route custody."))
         {
             using var decoded = publication.Use(bytes => ProtectedDid2ContactRouteJournal.Decode(bytes, networkId, account.Span, instance.Span));
+            await ProtectedDid2ContactRouteJournal.RequireArchiveCustodyAsync(storage, publication, networkId, account, instance, ct).ConfigureAwait(false);
             publication.Use(bytes => { hash.AppendData(SHA256.HashData(bytes)); return true; });
         }
         var resolverDigest = await new ProtectedDeepIdV2ResolverCapabilityStore(storage, networkId, account.Span)

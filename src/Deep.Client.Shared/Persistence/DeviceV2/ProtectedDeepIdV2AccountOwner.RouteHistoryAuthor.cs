@@ -213,6 +213,9 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         {
             rootHash = raw.Use(bytes => SHA256.HashData(bytes));
             using var state = raw.Use(bytes => ProtectedDid2ContactRouteJournal.Decode(bytes, scope.Network, scope.LocalAccount, scope.Instance));
+            await HydratePublicationArchiveAsync(state, raw, scope.LocalAccount.ToArray(), scope.Instance.ToArray(), ct).ConfigureAwait(false);
+            foreach (var reference in state.Archived)
+                originalRoots.Add(ProtectedDid2ContactRouteJournal.ArchiveSlot(scope.Instance, reference.Key), reference.Value.Hash.ToArray());
             foreach (var entry in state.Entries.Values)
             {
                 if (entry.Kind != 1 || entry.Phase < 2) continue;

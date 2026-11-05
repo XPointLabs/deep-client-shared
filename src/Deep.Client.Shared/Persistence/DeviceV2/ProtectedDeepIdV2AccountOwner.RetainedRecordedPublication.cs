@@ -25,7 +25,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             {
                 // After promotion only the exact terminal archive locator may
                 // remain. A live intermediate proposal cannot be skipped.
-                if (state.Entries.ContainsKey(Convert.ToHexString(cursor)))
+                if (state.Entries.ContainsKey(Convert.ToHexString(cursor)) || state.Archived.ContainsKey(Convert.ToHexString(cursor)))
                     throw new CryptographicException("Retained recorded publication crosses a live intermediate intent.");
                 var slot = ProtectedDid2ContactRenewalClosure.ClosedSlot(cursor);
                 byte[] next, requestHash;

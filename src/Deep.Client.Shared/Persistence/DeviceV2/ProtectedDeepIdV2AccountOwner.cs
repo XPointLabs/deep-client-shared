@@ -451,7 +451,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
 
     private async ValueTask<VerifiedDeepIdV2CurrentAccount?>
         ReadCurrentUnderLeaseAsync(ulong trustedUnixSeconds,
-            IDeepMlDsa65Verifier mlDsa65, CancellationToken cancellationToken, bool explicitArchiveEnrollment = false)
+            IDeepMlDsa65Verifier mlDsa65, CancellationToken cancellationToken, bool explicitArchiveEnrollment = false, bool explicitPublicationEnrollment = false)
     {
         var current = await Index().ReadVerifiedAsync(trustedUnixSeconds,
             mlDsa65, cancellationToken).ConfigureAwait(false);
@@ -459,7 +459,10 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         {
             try
             {
-                if (explicitArchiveEnrollment)
+                if (explicitPublicationEnrollment)
+                    await SqliteDeepIdV2AccountGeneration.EnsureForPublicationArchiveEnrollmentAsync(sqlStatePath, storage, networkId,
+                        current.AccountId, current.DisplayName, current.Verified, cancellationToken, registrationGrammar).ConfigureAwait(false);
+                else if (explicitArchiveEnrollment)
                     await SqliteDeepIdV2AccountGeneration.EnsureForArchiveEnrollmentAsync(sqlStatePath, storage, networkId,
                         current.AccountId, current.DisplayName, current.Verified, cancellationToken, registrationGrammar).ConfigureAwait(false);
                 else
@@ -476,7 +479,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 throw;
             }
         }
-        if (explicitArchiveEnrollment) return null;
+        if (explicitArchiveEnrollment || explicitPublicationEnrollment) return null;
         var name = await ReadCreationIntentAsync(cancellationToken)
             .ConfigureAwait(false);
         var candidate = await ReadCandidateAccountIdAsync(cancellationToken)
@@ -525,9 +528,9 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
 
     private async ValueTask<VerifiedDeepIdV2CurrentAccount>
         RequireCurrentUnderLeaseAsync(ulong trustedUnixSeconds,
-            IDeepMlDsa65Verifier mlDsa65, CancellationToken cancellationToken, bool explicitArchiveEnrollment = false)
+            IDeepMlDsa65Verifier mlDsa65, CancellationToken cancellationToken, bool explicitArchiveEnrollment = false, bool explicitPublicationEnrollment = false)
     {
-        var current = await ReadCurrentUnderLeaseAsync(trustedUnixSeconds, mlDsa65, cancellationToken, explicitArchiveEnrollment).ConfigureAwait(false)
+        var current = await ReadCurrentUnderLeaseAsync(trustedUnixSeconds, mlDsa65, cancellationToken, explicitArchiveEnrollment, explicitPublicationEnrollment).ConfigureAwait(false)
             ?? throw new InvalidOperationException("No current DID2 account exists.");
         try
         {

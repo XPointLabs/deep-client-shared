@@ -65,6 +65,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             snapshot = owned.Use(bytes => bytes.ToArray());
             using var state = ProtectedDid2ContactRouteJournal.Decode(snapshot, networkId, current.AccountId.Span, instance);
             var name = Convert.ToHexString(intent.Span);
+            await HydratePublicationArchiveAsync(state, owned, current.AccountId, instance, ct, selectedIntent: name).ConfigureAwait(false);
             if (!state.Entries.TryGetValue(name, out var entry) || entry.Kind != kind || entry.Phase < 4 || !entry.Matches(configuration))
                 throw new CryptographicException("Publication requires exact retained contact object custody.");
             var checkpoint = fresh.Proof.CurrentCheckpoint!;

@@ -31,7 +31,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
     public void Did2OwnedRoute_ByteBudgetMatchesProtectedStoreAndRejectsOversizeBeforeEntries()
     {
         Assert.Equal(477_756, ProtectedDid2ContactRouteJournal.MaximumEntryBytes);
-        Assert.Equal(10, ProtectedDid2ContactRouteJournal.Version);
+        Assert.Equal(11, ProtectedDid2ContactRouteJournal.Version);
         Assert.Equal(DeepSecureStorageRegistration.MaximumValueBytes, ProtectedDid2ContactRouteJournal.MaximumBytes);
         var reservation = 4 + ProtectedDid2ContactRouteJournal.MaximumEntryBytes;
         Assert.True(ProtectedDid2ContactRouteJournal.HeaderBytes + 2 * reservation <= ProtectedDid2ContactRouteJournal.MaximumBytes);
@@ -172,7 +172,17 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             var bytes = await RouteSnapshot();
             using var record = await innerStorage.ReadOwnedAsync("deep.store.v2.sql-generation");
             var instance = record!.Use(value => value.Slice(56, 32).ToArray());
-            try { return ProtectedDid2ContactRouteJournal.Decode(bytes, Network, checkpoint.Binding.Record.DeepAccountId.Span, instance); }
+            try
+            {
+                var state = ProtectedDid2ContactRouteJournal.Decode(bytes, Network, checkpoint.Binding.Record.DeepAccountId.Span, instance);
+                try
+                {
+                    await ProtectedDid2ContactRouteJournal.HydrateAsync(storage, state, bytes, Network,
+                        checkpoint.Binding.Record.DeepAccountId, instance, default);
+                    return state;
+                }
+                catch { state.Dispose(); throw; }
+            }
             finally { CryptographicOperations.ZeroMemory(bytes); CryptographicOperations.ZeroMemory(instance); }
         }
     }

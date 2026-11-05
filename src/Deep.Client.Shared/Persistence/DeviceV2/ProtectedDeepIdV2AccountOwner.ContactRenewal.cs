@@ -35,6 +35,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 throw new InvalidDataException("Protected route custody is absent; explicit local reset is required.");
             snapshot = owned.Use(bytes => bytes.ToArray());
             using var state = ProtectedDid2ContactRouteJournal.Decode(snapshot, networkId, current.AccountId.Span, instance);
+            state.PinnedIntent = plan.Intent.ToArray();
             var currentName = Convert.ToHexString(plan.Intent.Span);
             if (!state.Entries.TryGetValue(currentName, out var prior) || prior.Phase != 7) return null;
             var configuration = Did2OwnedPermanentContactPlan.Configuration();

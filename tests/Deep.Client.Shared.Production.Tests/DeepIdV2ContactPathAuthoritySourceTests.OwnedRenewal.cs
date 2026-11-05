@@ -242,7 +242,8 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             }
         }
 
-        internal async Task CheckOwnedRenewalAsync(bool interruptedRetrieve = false, bool pollRetainedPaths = false)
+        internal async Task CheckOwnedRenewalAsync(bool interruptedRetrieve = false, bool pollRetainedPaths = false,
+            bool archiveCompletedPublications = false)
         {
             await SeedShortPermanentProposalAsync();
             var address = (await accounts.GetCurrentAsync())!.PermanentId;
@@ -345,11 +346,18 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                 Assert.Equal(callbacks, (backend.RouteCalls, backend.PublicationCalls, backend.ReplicaCalls));
                 Assert.Equal(address.CanonicalText, (await accounts.GetCurrentAsync())!.PermanentId.CanonicalText);
                 Assert.True(plan.Matches(await accounts.ReadOwnPermanentContactPlanAsync()));
+                if (archiveCompletedPublications)
+                {
+                    using var cold = ReopenAccount();
+                    var archived = await cold.EnrollPublicationArchiveAsync();
+                    Assert.Equal(1, archived.ArchivedEntries);
+                    Assert.Equal(1, archived.WorkingEntries);
+                }
                 if (interruptedRetrieve)
                 {
                     Assert.Equal(readRoot, await RootCopy(ProtectedDid2MailboxReadJournal.Slot));
                     Assert.Equal(grantRoot, await RootCopy(ProtectedDid2MailboxGrantJournal.Slot));
-                    await RejectMissingOriginalPublication();
+                    if (!archiveCompletedPublications) await RejectMissingOriginalPublication();
                     Assert.Equal(0, (await SynchronizeNativeSender(grants, terminal)).ProcessedEnvelopes);
                     Assert.Equal(1, grants.Calls); Assert.Equal(1, terminal.RetrieveCalls); Assert.Equal(0, terminal.AckCalls);
                     Assert.Equal(grantRoot, await RootCopy(ProtectedDid2MailboxGrantJournal.Slot));
@@ -368,7 +376,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                         Assert.All(multiple.Transports.Values, transport => Assert.Equal(1, transport.Calls));
                         Assert.Equal(7, terminal.RetrieveCalls); Assert.Equal(0, terminal.AckCalls);
                         Assert.Equal(2, terminal.RetrievedOriginalRoutes.DistinctBy(Convert.ToHexString).Count());
-                        await RejectUnboundArchivedPublication(multiple, terminal);
+                        if (!archiveCompletedPublications) await RejectUnboundArchivedPublication(multiple, terminal);
                     }
                 }
             }

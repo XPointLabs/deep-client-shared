@@ -10,11 +10,11 @@ using Deep.Protocol.Identity;
 
 namespace Deep.Client.Shared.Persistence.DeviceV2;
 
-internal static class ProtectedDid2ContactRouteJournal
+internal static partial class ProtectedDid2ContactRouteJournal
 {
     internal const string Slot = "deep.store.v2.contact-route-journal";
-    internal const int HeaderBytes = 92, PrefixBytes = 170, MaximumIntents = 128;
-    internal const byte Version = 10;
+    internal const int HeaderBytes = 124, PrefixBytes = 170, MaximumIntents = 128;
+    internal const byte Version = 11;
     internal const int MaximumEntryBytes = 477_756;
     // Matches the journaled production secure-store per-slot limit. Pending
     // routes reserve enough space for phase 7 before a threshold callback.
@@ -24,7 +24,9 @@ internal static class ProtectedDid2ContactRouteJournal
     internal sealed class State : IDisposable
     {
         internal SortedDictionary<string, Entry> Entries { get; } = new(StringComparer.Ordinal);
-        public void Dispose() { foreach (var entry in Entries.Values) entry.Dispose(); Entries.Clear(); }
+        internal SortedDictionary<string, ArchiveReference> Archived { get; } = new(StringComparer.Ordinal);
+        internal byte[] PinnedIntent { get; set; } = new byte[32];
+        public void Dispose() { foreach (var entry in Entries.Values) entry.Dispose(); Entries.Clear(); foreach (var reference in Archived.Values) reference.Dispose(); Archived.Clear(); CryptographicOperations.ZeroMemory(PinnedIntent); }
     }
 
     internal sealed class Entry : IDisposable
@@ -320,9 +322,10 @@ internal static class ProtectedDid2ContactRouteJournal
     internal static byte[] Encode(State state, ReadOnlySpan<byte> network, ReadOnlySpan<byte> account, ReadOnlySpan<byte> instance)
     {
         Scope(network, account, instance);
-        if (state.Entries.Count > MaximumIntents) throw new IOException("Protected route capacity is exhausted.");
-        var size = HeaderBytes; var reserved = HeaderBytes; ulong revision = 1;
-        foreach (var pair in state.Entries)
+        if (WorkingCount(state) + state.Archived.Count > MaximumIntents) throw new IOException("Protected route capacity is exhausted.");
+        ValidateArchive(state);
+        var size = checked(HeaderBytes + state.Archived.Count * ArchiveReferenceBytes); var reserved = size; ulong revision = checked(1UL + (ulong)state.Archived.Count * 7);
+        foreach (var pair in state.Entries.Where(pair => !state.Archived.ContainsKey(pair.Key)))
         {
             using var checkedEntry = Entry.Decode(pair.Value.Exact, network, account);
             if (pair.Key != Convert.ToHexString(checkedEntry.Exact[..32])) throw new InvalidDataException("Protected route intent name differs.");
@@ -330,27 +333,28 @@ internal static class ProtectedDid2ContactRouteJournal
             reserved = checked(reserved + 4 + checkedEntry.ReservedBytes);
         }
         if (reserved > MaximumBytes) throw new IOException("Protected route byte capacity is exhausted before publication.");
-        var result = new byte[size]; result[0] = Version;
-        BinaryPrimitives.WriteUInt16BigEndian(result.AsSpan(2), checked((ushort)state.Entries.Count));
+        var result = new byte[size]; result[0] = Version; result[1] = checked((byte)state.Archived.Count);
+        BinaryPrimitives.WriteUInt16BigEndian(result.AsSpan(2), checked((ushort)WorkingCount(state)));
         BinaryPrimitives.WriteUInt64BigEndian(result.AsSpan(4), revision);
-        network.CopyTo(result.AsSpan(12)); account.CopyTo(result.AsSpan(28)); instance.CopyTo(result.AsSpan(60));
+        network.CopyTo(result.AsSpan(12)); account.CopyTo(result.AsSpan(28)); instance.CopyTo(result.AsSpan(60)); state.PinnedIntent.CopyTo(result, 92);
         var offset = HeaderBytes;
-        foreach (var entry in state.Entries.Values)
+        foreach (var entry in state.Entries.Where(pair => !state.Archived.ContainsKey(pair.Key)).Select(pair => pair.Value))
         {
             BinaryPrimitives.WriteUInt32BigEndian(result.AsSpan(offset), checked((uint)entry.Exact.Length)); offset += 4;
             entry.Exact.CopyTo(result.AsSpan(offset)); offset += entry.Exact.Length;
         }
+        WriteArchiveReferences(state, result.AsSpan(offset));
         return result;
     }
     internal static State Decode(ReadOnlySpan<byte> bytes, ReadOnlySpan<byte> network, ReadOnlySpan<byte> account, ReadOnlySpan<byte> instance)
     {
         Scope(network, account, instance);
-        if (bytes.Length is < HeaderBytes or > MaximumBytes || bytes[0] != Version || bytes[1] != 0 ||
+        if (bytes.Length is < HeaderBytes or > MaximumBytes || bytes[0] != Version || bytes[1] > MaximumIntents ||
             !Fixed(bytes.Slice(12, 16), network) || !Fixed(bytes.Slice(28, 32), account) || !Fixed(bytes.Slice(60, 32), instance))
             throw new InvalidDataException("Protected route journal is incompatible or belongs to another account instance.");
         var count = BinaryPrimitives.ReadUInt16BigEndian(bytes[2..]);
-        if (count > MaximumIntents) throw new InvalidDataException("Protected route count is outside its bound.");
-        var state = new State(); var offset = HeaderBytes; var reserved = HeaderBytes; ulong revision = 1; string? previous = null;
+        if (count + bytes[1] > MaximumIntents) throw new InvalidDataException("Protected route count is outside its bound.");
+        var state = new State { PinnedIntent = bytes.Slice(92, 32).ToArray() }; var offset = HeaderBytes; var reserved = checked(HeaderBytes + bytes[1] * ArchiveReferenceBytes); ulong revision = checked(1UL + (ulong)bytes[1] * 7); string? previous = null;
         try
         {
             for (var index = 0; index < count; index++)
@@ -366,7 +370,9 @@ internal static class ProtectedDid2ContactRouteJournal
                 reserved = checked(reserved + 4 + entry.ReservedBytes);
                 if (reserved > MaximumBytes) throw new InvalidDataException("Protected route reservation exceeds its byte capacity.");
             }
-            if (offset != bytes.Length || BinaryPrimitives.ReadUInt64BigEndian(bytes[4..]) != revision)
+            ReadArchiveReferences(state, bytes[offset..], bytes[1]);
+            offset = bytes.Length;
+            if (BinaryPrimitives.ReadUInt64BigEndian(bytes[4..]) != revision)
                 throw new InvalidDataException("Protected route revision/trailing bytes are noncanonical.");
             return state;
         }

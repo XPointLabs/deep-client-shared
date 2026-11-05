@@ -26,6 +26,8 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 using var publication = await owner.OpenOwnRetainedPublicationUnderLeaseAsync(current, held, source, fresh, ct, route.ExactHash).ConfigureAwait(false);
                 using var publicationRaw = await owner.storage.ReadOwnedAsync(ProtectedDid2ContactRouteJournal.Slot, ct).ConfigureAwait(false) ?? throw new InvalidDataException("Archived publication is absent.");
                 using var publications = publicationRaw.Use(bytes => ProtectedDid2ContactRouteJournal.Decode(bytes, owner.networkId, current.AccountId.Span, instance));
+                if (publications.Archived.Values.Any(reference => FixedRoute(reference.Route, route.ExactHash.Span)))
+                    throw new IOException("Exact publication archive retirement requires an archive-aware erasure owner; no effect was applied.");
                 var permanent = owner.CreatePermanentContactPlan(current, instance);
                 var main = Convert.ToHexString(permanent.Intent.Span);
                 if (!publications.Entries.TryGetValue(main, out var active) || active.Phase != 7 || active.Kind != 1 ||
@@ -160,6 +162,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             : await SqliteDeepIdV2AccountGeneration.ReadNativeReplayFenceUnderLeaseAsync(storage, lease, sqlStatePath, selecting, held, ct).ConfigureAwait(false));
         using var publication = await storage.ReadOwnedAsync(ProtectedDid2ContactRouteJournal.Slot, ct).ConfigureAwait(false) ?? throw new InvalidDataException("Retained-path publication root is absent.");
         using var decoded = publication.Use(bytes => ProtectedDid2ContactRouteJournal.Decode(bytes, networkId, account.Span, instance.Span));
+        await ProtectedDid2ContactRouteJournal.RequireArchiveCustodyAsync(storage, publication, networkId, account, instance, ct).ConfigureAwait(false);
         result.Add(new(Did2CompactionPlan.RootKind.ContactPublication, CompactionSlotSelector(ProtectedDid2ContactRouteJournal.Slot), publication.Use(bytes => SHA256.HashData(bytes))));
         result.Add(await ReadMailboxLocalCustodyUnderLeaseAsync(account, instance, held, ct).ConfigureAwait(false));
         ct.ThrowIfCancellationRequested(); held.RequireOwner(lease); return result;

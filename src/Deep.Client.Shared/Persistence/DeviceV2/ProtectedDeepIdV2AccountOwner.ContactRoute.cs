@@ -53,6 +53,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             snapshot = owned.Use(bytes => bytes.ToArray());
             using var state = ProtectedDid2ContactRouteJournal.Decode(snapshot, networkId, current.AccountId.Span, instance);
             var name = Convert.ToHexString(intent.Span);
+            await HydratePublicationArchiveAsync(state, owned, current.AccountId, instance, ct, selectedIntent: name).ConfigureAwait(false);
             if (!state.Entries.TryGetValue(name, out var entry) || entry.Kind != kind || entry.Phase < 3 || !entry.Matches(configuration) ||
                 !FixedRoute(entry.Record(0).Span, staged.ExactDca1.Span))
                 throw new CryptographicException("Contact object requires the exact retained completed route.");
@@ -160,7 +161,9 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 throw new InvalidDataException("Protected route custody is absent; explicit local reset is required.");
             snapshot = owned.Use(value => value.ToArray());
             using var state = ProtectedDid2ContactRouteJournal.Decode(snapshot, networkId, current.AccountId.Span, instance);
+            if (bootstrap is not null) state.PinnedIntent = bootstrap.Intent.ToArray();
             var name = Convert.ToHexString(intent.Span);
+            await HydratePublicationArchiveAsync(state, owned, current.AccountId, instance, ct, selectedIntent: name).ConfigureAwait(false);
             var checkpoint = fresh.Proof.CurrentCheckpoint!;
             var dca = DeepIdV2ContactAuthorizationCodec.Verify(DeepIdV2ContactAuthorizationCodec.Decode(exactDca.Span),
                 checkpoint.Binding, checkpoint.Directory);
@@ -169,7 +172,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 throw new CryptographicException("Owned route kind is not authorized by its exact delegation.");
             if (!state.Entries.TryGetValue(name, out var entry))
             {
-                if (state.Entries.Count >= ProtectedDid2ContactRouteJournal.MaximumIntents)
+                if (ProtectedDid2ContactRouteJournal.WorkingCount(state) + state.Archived.Count >= ProtectedDid2ContactRouteJournal.MaximumIntents)
                     throw new IOException("Protected route capacity is exhausted.");
                 var scalar = NewRouteRandom32(); var keyId = NewRouteRandom32(); var nonce = NewRouteRandom32();
                 try
@@ -293,19 +296,31 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
     private async Task<byte[]> SaveRouteJournalAsync(ProtectedDid2ContactRouteJournal.State state, byte[] expected,
         ReadOnlyMemory<byte> account, byte[] instance, CancellationToken ct)
     {
-        var next = ProtectedDid2ContactRouteJournal.Encode(state, networkId, account.Span, instance);
+        using (var before = ProtectedDid2ContactRouteJournal.Decode(expected, networkId, account.Span, instance))
+            ProtectedDid2ContactRouteJournal.RequireArchiveSuccessor(before, state);
+        var copies = ProtectedDid2ContactRouteJournal.StageArchive(state, instance, all: false);
+        byte[] next = [];
         try
         {
+            next = ProtectedDid2ContactRouteJournal.Encode(state, networkId, account.Span, instance);
             ct.ThrowIfCancellationRequested();
-            if (!await storage.CompareExchangeAsync(ProtectedDid2ContactRouteJournal.Slot, expected, next, ct).ConfigureAwait(false))
-                throw new IOException("Protected route custody changed during account-owned adoption.");
+            var adopted = copies.Count == 0
+                ? await storage.CompareExchangeAsync(ProtectedDid2ContactRouteJournal.Slot, expected, next, ct).ConfigureAwait(false)
+                : await storage.CompareExchangeAndInsertAsync(ProtectedDid2ContactRouteJournal.Slot, expected, next, copies, ct).ConfigureAwait(false);
+            if (!adopted) throw new IOException("Protected route custody changed during account-owned adoption.");
             using var readback = await storage.ReadOwnedAsync(ProtectedDid2ContactRouteJournal.Slot, ct).ConfigureAwait(false) ??
                 throw new CryptographicException("Adopted route custody is absent.");
             if (!readback.Use(bytes => FixedRoute(bytes, next)))
                 throw new CryptographicException("Adopted route custody differs from its exact winner.");
+            await ProtectedDid2ContactRouteJournal.RequireArchiveCustodyAsync(storage, readback,
+                networkId, account, instance, ct).ConfigureAwait(false);
             ct.ThrowIfCancellationRequested(); return next.ToArray();
         }
-        finally { CryptographicOperations.ZeroMemory(next); }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(next);
+            foreach (var copy in copies) CryptographicOperations.ZeroMemory(System.Runtime.InteropServices.MemoryMarshal.AsMemory(copy.Value).Span);
+        }
     }
     private static bool FixedRoute(ReadOnlySpan<byte> a, ReadOnlySpan<byte> b) => a.Length == b.Length && CryptographicOperations.FixedTimeEquals(a, b);
     private static byte[] NewRouteRandom32()
