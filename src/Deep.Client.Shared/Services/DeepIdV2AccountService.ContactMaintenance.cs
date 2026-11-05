@@ -50,11 +50,21 @@ public sealed partial class DeepIdV2AccountService
         DeepIdV2ContactPathAuthoritySource source, IReadOnlyDictionary<string, DeepPermanentIdV2> addresses, CancellationToken ct)
     {
         var contacts = await ListConversationsAsync(ct).ConfigureAwait(false);
-        return await MaintainAcceptedContactRoutesAsync(contacts,
+        var expiredDeferred = 0; var expiredReintroductions = 0;
+        var result = await MaintainAcceptedContactRoutesAsync(contacts,
             (conversation, token) => ReadContactRouteHealthAsync(conversation, source, token),
-            (conversation, token) => RefreshPublishedContactRouteAsync(conversation, source, token), ct,
+            async (conversation, token) =>
+            {
+                var outcome = await MaintainPublishedContactRouteAsync(conversation,
+                    addresses.GetValueOrDefault(conversation.ConversationId), source, token).ConfigureAwait(false);
+                if (outcome.Deferred) expiredDeferred++;
+                if (outcome.Reintroduced) expiredReintroductions += outcome.Completed;
+                return outcome.Completed;
+            }, ct,
             async (conversation, token) => addresses.TryGetValue(conversation.ConversationId, out var address)
                 ? await ReintroducePublishedContactRouteAsync(conversation, address, source, token).ConfigureAwait(false) : null).ConfigureAwait(false);
+        return result with { DeferredContacts = result.DeferredContacts + expiredDeferred,
+            Reintroductions = result.Reintroductions + expiredReintroductions };
     }
 
     internal static IReadOnlyDictionary<string, DeepPermanentIdV2> CopyKnownContactAddresses(

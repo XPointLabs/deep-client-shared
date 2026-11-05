@@ -126,6 +126,23 @@ public sealed partial class DeepIdV2AccountService
 
     private async Task<int> RefreshPublishedContactRouteAsync(DeepIdV2Conversation conversation,
         DeepIdV2ContactPathAuthoritySource source, CancellationToken ct)
+        => (await DispatchPublishedContactMaintenanceAsync(conversation, source, RouteMaintenanceDispatch.Ordinary,
+            null, ct).ConfigureAwait(false)).Completed;
+
+    private enum RouteMaintenanceDispatch { Ordinary, Connected }
+    internal readonly record struct ConnectedContactRouteMaintenanceOutcome(int Completed, bool Reintroduced, bool Deferred);
+
+    internal Task<ConnectedContactRouteMaintenanceOutcome> MaintainPublishedContactRouteAsync(
+        DeepIdV2Conversation conversation, DeepPermanentIdV2? knownPeer, DeepIdV2ContactPathAuthoritySource source,
+        CancellationToken ct, IExactContactResolveOnionTransport? contactRead = null,
+        IDid2MailboxGrantTransport? grants = null, IDid2OwnedMailboxTransportFactory? transport = null)
+        => DispatchPublishedContactMaintenanceAsync(conversation, source, RouteMaintenanceDispatch.Connected,
+            knownPeer, ct, contactRead, grants, transport);
+
+    private async Task<ConnectedContactRouteMaintenanceOutcome> DispatchPublishedContactMaintenanceAsync(
+        DeepIdV2Conversation conversation, DeepIdV2ContactPathAuthoritySource source, RouteMaintenanceDispatch purpose,
+        DeepPermanentIdV2? knownPeer, CancellationToken ct, IExactContactResolveOnionTransport? contactRead = null,
+        IDid2MailboxGrantTransport? grants = null, IDid2OwnedMailboxTransportFactory? transport = null)
     {
         using var reads = source.OpenCommandReadScope(); source = reads.Source;
         var pair = await source.VerifyForOwnMessagingAsync(this, conversation.Scope, ct).ConfigureAwait(false);
@@ -134,17 +151,37 @@ public sealed partial class DeepIdV2AccountService
             pair.Own, pair.Peer, source, ct).ConfigureAwait(false);
         var selection = await owner.SelectOwnRouteMaintenanceAsync(TrustedUnixSeconds(), verifier,
             conversation.Scope, pair.Own, pair.Peer, source, ct).ConfigureAwait(false);
-        if (selection is null) return 0;
+        if (selection is null) return new(0, false, false);
         try
         {
+            var expired = purpose == RouteMaintenanceDispatch.Connected &&
+                await owner.ReadExpiredPeerAnnouncementForMaintenanceAsync(TrustedUnixSeconds(), verifier,
+                    conversation.Scope, pair.Own, pair.Peer, source, ct).ConfigureAwait(false);
+            if (expired && knownPeer is null) return new(0, false, true);
+            using var alternateReads = expired ? source.OpenIndependentCommandReadScope() : null;
+            var dispatchSource = alternateReads?.Source ?? source;
+            DeepIdV2ContactPathAuthoritySource.PermanentContactAuthority? resolved = null;
+            if (expired)
+            {
+                resolved = await ResolveOwnedPermanentContactAsync(knownPeer!, dispatchSource, contactRead, ct).ConfigureAwait(false);
+                // Expiry selects only this attempted path. The unchanged owner
+                // independently admits the actual known peer/scope/effect.
+                await owner.RequireRouteReintroductionAsync(TrustedUnixSeconds(), verifier, conversation.Scope,
+                    resolved, dispatchSource, ct).ConfigureAwait(false);
+            }
             using var command = selection.Length == 0
-                ? await CreateOwnElectiveRouteAnnouncementAsync(conversation.Scope, source, ct).ConfigureAwait(false)
-                : await PrepareOwnDirectRouteUpdateAsync(conversation.Scope, selection, source, ct).ConfigureAwait(false);
-            if (command is null) return 0;
+                ? await CreateOwnElectiveRouteAnnouncementAsync(conversation.Scope, dispatchSource, ct).ConfigureAwait(false)
+                : await PrepareOwnDirectRouteUpdateAsync(conversation.Scope, selection, dispatchSource, ct).ConfigureAwait(false);
+            if (command is null) return new(0, false, expired);
             using var native = await SendOwnedMessagingCoreAsync(conversation.Scope, command.OperationId,
-                command.ExactDmc2, source, ct, routeControl: true).ConfigureAwait(false);
-            _ = await DeliverOwnMessagingAsync(conversation.Scope, command.OperationId, source, ct).ConfigureAwait(false);
-            return 1;
+                command.ExactDmc2, dispatchSource, ct, routeControl: true).ConfigureAwait(false);
+            if (resolved is null)
+                _ = await DeliverOwnMessagingAsync(conversation.Scope, command.OperationId, dispatchSource, ct).ConfigureAwait(false);
+            else
+                _ = await DeliverOwnRouteReintroductionWithRecoveryAsync(conversation.Scope, command.OperationId, knownPeer!,
+                    resolved, dispatchSource, grants ?? new Did2MailboxGrantOnionTransport(dispatchSource),
+                    transport ?? new Did2OwnedMailboxOnionTransportFactory(), ct, contactRead).ConfigureAwait(false);
+            return new(1, expired, expired);
         }
         finally { CryptographicOperations.ZeroMemory(selection); }
     }

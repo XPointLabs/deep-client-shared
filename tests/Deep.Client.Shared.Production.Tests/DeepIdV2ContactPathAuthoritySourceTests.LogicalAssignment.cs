@@ -156,6 +156,45 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                 var verified = await DeepIdV2ContactRouteUpdateVerifier.VerifyCurrentHistoryAnnouncementAsync(endpoint,
                     control.CanonicalBytes, next.Proof, next.Network, next.Authority, time);
                 await verified.EnsureCurrentAsync();
+                Assert.False(await DeepIdV2ContactRouteUpdateVerifier.IsVerifiedHistoryAnnouncementExpiredForMaintenanceAsync(
+                    endpoint, control.CanonicalBytes, next.Proof, next.Network, next.Authority, time));
+                var currentWindow = await verified.ReadCurrentTimeAsync();
+                var currentUpperMilliseconds = checked(currentWindow.UpperUnixSeconds * 1000);
+                var futureCreation = control.CanonicalBytes.ToArray();
+                var outsideSignedCreation = control.CanonicalBytes.ToArray();
+                try
+                {
+                    // Only hostile DMC copies change. The independently signed
+                    // endpoint, native inputs and trusted clock stay genuine.
+                    var future = checked(currentUpperMilliseconds + 1000);
+                    Assert.True(future < control.Record.ExpiresAtUnixMilliseconds);
+                    BinaryPrimitives.WriteUInt64BigEndian(futureCreation.AsSpan(FieldOffset(futureCreation, 7)), future);
+                    _ = ApplicationCoreCodec.DecodeDmc2(futureCreation);
+                    await Assert.ThrowsAsync<CryptographicException>(async () => await DeepIdV2ContactRouteUpdateVerifier.IsVerifiedHistoryAnnouncementExpiredForMaintenanceAsync(
+                        endpoint, futureCreation, next.Proof, next.Network, next.Authority, time));
+                    // A purportedly expired future-created event is not even a
+                    // canonical interval; scheduling must not turn it into true.
+                    BinaryPrimitives.WriteUInt64BigEndian(futureCreation.AsSpan(FieldOffset(futureCreation, 8)), currentUpperMilliseconds);
+                    await Assert.ThrowsAsync<ApplicationCoreFormatException>(async () => await DeepIdV2ContactRouteUpdateVerifier.IsVerifiedHistoryAnnouncementExpiredForMaintenanceAsync(
+                        endpoint, futureCreation, next.Proof, next.Network, next.Authority, time));
+
+                    var signedStart = new[] { (controlRoute.Route.Authorization, 12), (controlRoute.Route.Reachability, 16),
+                        (controlRoute.Route.Selection, 8), (controlRoute.Route.Route, 17), (controlRoute.Route.Successor, 10) }
+                        .Max(part => BinaryPrimitives.ReadUInt64BigEndian(part.Item1.Field(part.Item2).Span));
+                    Assert.True(signedStart > 0 && checked(signedStart * 1000) <= currentUpperMilliseconds);
+                    BinaryPrimitives.WriteUInt64BigEndian(outsideSignedCreation.AsSpan(FieldOffset(outsideSignedCreation, 7)), checked((signedStart - 1) * 1000));
+                    // This interval IS canonical and expired, but its creation
+                    // predates the actual signed endpoint: still a hard refusal.
+                    BinaryPrimitives.WriteUInt64BigEndian(outsideSignedCreation.AsSpan(FieldOffset(outsideSignedCreation, 8)), currentUpperMilliseconds);
+                    _ = ApplicationCoreCodec.DecodeDmc2(outsideSignedCreation);
+                    await Assert.ThrowsAsync<CryptographicException>(async () => await DeepIdV2ContactRouteUpdateVerifier.IsVerifiedHistoryAnnouncementExpiredForMaintenanceAsync(
+                        endpoint, outsideSignedCreation, next.Proof, next.Network, next.Authority, time));
+                }
+                finally
+                {
+                    CryptographicOperations.ZeroMemory(futureCreation);
+                    CryptographicOperations.ZeroMemory(outsideSignedCreation);
+                }
                 var evidence = await ApplicationCoreCodec.AuthorVerifiedContactRouteHistoryPageAsync(before, [step], false,
                     new byte[32], currentRecipient, next.Network, next.Authority, Bytes(32, 0xb8), 4, time);
                 Assert.Equal(DeepIdV2ContactRouteHistoryMode.Evidence,
@@ -178,6 +217,8 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                 ProofTime = 1_150; Sample = 250;
                 var now = await Source(reopened).VerifyForOwnPreKeyAuthoringAsync(reopened, default);
                 await Assert.ThrowsAsync<CryptographicException>(async () => await DeepIdV2ContactRouteUpdateVerifier.VerifyCurrentHistoryAnnouncementAsync(
+                    endpoint, control.CanonicalBytes, now.Proof, now.Network, now.Authority, time));
+                await Assert.ThrowsAsync<CryptographicException>(async () => await DeepIdV2ContactRouteUpdateVerifier.IsVerifiedHistoryAnnouncementExpiredForMaintenanceAsync(
                     endpoint, control.CanonicalBytes, now.Proof, now.Network, now.Authority, time));
                 var facts = await DeepIdV2ContactRouteUpdateVerifier.VerifyHistoryPageAsync(before, control.CanonicalBytes,
                     now.Proof, now.Network, now.Authority, time);
