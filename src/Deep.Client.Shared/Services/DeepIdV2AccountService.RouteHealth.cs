@@ -10,6 +10,23 @@ public sealed record DeepIdV2ContactRouteHealth(bool AdvertisementIntervalCovers
 
 public sealed partial class DeepIdV2AccountService
 {
+    /// <summary>Requires the relationship's actual native peer delivery route to pass current Protocol verification. Exports no route or capability.</summary>
+    /// <param name="conversation">The existing locally owned conversation.</param>
+    /// <param name="source">This account's independent current network and directory source.</param>
+    /// <param name="ct">Cancellation for this read.</param>
+    /// <returns>A completed task after current route and native custody checks; subsequent effects must independently recheck them.</returns>
+    public async Task RequireCurrentContactRouteAsync(DeepIdV2Conversation conversation,
+        DeepIdV2ContactPathAuthoritySource source, CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(conversation); ArgumentNullException.ThrowIfNull(source);
+        source.RequireAccountOwner(this);
+        using var reads = source.OpenIndependentCommandReadScope(); source = reads.Source;
+        var pair = await source.VerifyForOwnMessagingAsync(this, conversation.Scope, ct).ConfigureAwait(false);
+        using var verifier = OpenVerifier();
+        await owner.RequireCurrentContactRouteAsync(TrustedUnixSeconds(), verifier, conversation.Scope,
+            pair.Own, pair.Peer, source, ct).ConfigureAwait(false);
+    }
+
     /// <summary>Reads coarse route interval diagnostics from actual authenticated contact history. Exports no descriptor or capability.</summary>
     /// <param name="conversation">The existing locally owned conversation.</param>
     /// <param name="source">Independently current network/directory source.</param>

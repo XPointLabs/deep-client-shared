@@ -72,6 +72,7 @@
     <Compile Include="Persistence\SqliteDeepMailboxStore.OutboxCompaction.cs" />
     <Compile Include="Persistence\SqliteDeepMailboxStore.ArchiveAuthored.cs" />
     <Compile Include="Persistence\SqliteDeepMailboxStore.StoppedWorkAudit.cs" />
+    <Compile Include="Persistence\SqliteDeepMailboxStore.NeverAttemptedControl.cs" />
     <Compile Include="Persistence\SqliteDeepMailboxStore.TerminalAudit.cs" />
     <Compile Include="Persistence\SqliteDeepMailboxStore.RetainedPathCompaction.cs" />
     <Compile Include="Persistence\SqliteDeepMailboxStore.RetainedCoordinator.cs" />

@@ -2,6 +2,7 @@ using System.Buffers.Binary;
 using System.Security.Cryptography;
 using Deep.Client.Shared.Persistence.DeviceV2;
 using Deep.Client.Shared.Services.ContactV1;
+using Deep.Protocol.AccountDirectoryV1;
 using Deep.Protocol.ApplicationCore;
 using Deep.Protocol.ContactV1;
 using Deep.Protocol.ContactV2;
@@ -130,7 +131,8 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                     next.Network, next.Authority, carried.ExactXir1V2, carried.ExactRouteClosure, time);
                 var controlXra = await DeepIdV2ContactRouteAuthor.AuthorAdvertisementSuccessorAsync(currentRecipient,
                     next.Network, next.Authority, secrets!, carried.Route.Authorization.CanonicalBytes,
-                    Bytes(32, 0xb1), Bytes(32, 0xb2), ScalarMult.Base(Bytes(32, 0xb3)), 1_150, time);
+                    carried.Route.Authorization.Field(9), carried.Route.Authorization.Field(10),
+                    carried.Route.Authorization.Field(11), 1_150, time);
                 var controlRequest = RouteHistoryFixtureRequest(currentRecipient, controlPredecessor, controlXra.CanonicalBytes, 0xb4);
                 var controlIssued = await IssueRouteHistoryFixtureAsync(controlRequest, currentRecipient,
                     next.Network, next.Authority, controlPredecessor, 1_150, time);
@@ -154,6 +156,25 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                 var verified = await DeepIdV2ContactRouteUpdateVerifier.VerifyCurrentHistoryAnnouncementAsync(endpoint,
                     control.CanonicalBytes, next.Proof, next.Network, next.Authority, time);
                 await verified.EnsureCurrentAsync();
+                var evidence = await ApplicationCoreCodec.AuthorVerifiedContactRouteHistoryPageAsync(before, [step], false,
+                    new byte[32], currentRecipient, next.Network, next.Authority, Bytes(32, 0xb8), 4, time);
+                Assert.Equal(DeepIdV2ContactRouteHistoryMode.Evidence,
+                    Assert.IsType<ContactRouteHistoryDmc2Payload>(evidence.Record.ParsedPayload).Mode);
+                Assert.InRange(evidence.Record.ExpiresAtUnixMilliseconds - evidence.Record.CreatedAtUnixMilliseconds, 1UL, 120_000UL);
+                var authorClockReads = 0;
+                thresholdClockOverride = _ => ValueTask.FromResult(new OnionMonotonicReading(Boot,
+                    ++authorClockReads == 1 ? Sample : next.Proof.FreshnessDeadlineMonotonicSeconds));
+                try
+                {
+                    // The same genuine author authority is current on entry,
+                    // then expires at its final clock callback. A longer event
+                    // lifetime never releases an event from a stale author.
+                    var expiredAuthor = await Assert.ThrowsAsync<AccountDirectoryFreshnessVerificationException>(async () => await ApplicationCoreCodec.AuthorVerifiedContactRouteHistoryPageAsync(
+                        before, [step], true, new byte[32], currentRecipient, next.Network, next.Authority, Bytes(32, 0xb9), 5, time));
+                    Assert.Equal("DirectoryFreshnessExpired", expiredAuthor.Code);
+                    Assert.Equal(2, authorClockReads);
+                }
+                finally { thresholdClockOverride = null; }
                 ProofTime = 1_150; Sample = 250;
                 var now = await Source(reopened).VerifyForOwnPreKeyAuthoringAsync(reopened, default);
                 await Assert.ThrowsAsync<CryptographicException>(async () => await DeepIdV2ContactRouteUpdateVerifier.VerifyCurrentHistoryAnnouncementAsync(

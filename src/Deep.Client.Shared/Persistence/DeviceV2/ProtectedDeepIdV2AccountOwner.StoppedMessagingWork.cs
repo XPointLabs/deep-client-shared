@@ -164,7 +164,10 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         {
             using var sends = ProtectedDid2MailboxSendJournal.Decode(snapshot, scope.Network, scope.LocalAccount, scope.Instance);
             var entry = sends.Current(scope.Hash, operation.Span);
-            if (entry is null) return MessagingWorkPreflightResult.Active;
+            if (entry is null)
+                return await TryStopNeverAttemptedRouteControlUnderLeaseAsync(current, held, scope, authored, command,
+                    snapshot, own, source, ct).ConfigureAwait(false)
+                    ? MessagingWorkPreflightResult.ExpiredOriginalStopCompleted : MessagingWorkPreflightResult.Active;
             var time = await RecheckRouteFreshnessAsync(current, source, own, held, null, ct).ConfigureAwait(false);
             if (checked(own.Proof.TrustedLowerUnixSeconds + time.SampleSeconds - own.Proof.MonotonicSample) < entry.RetryUntil)
                 return MessagingWorkPreflightResult.Active;

@@ -56,7 +56,8 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         string? text, ReadOnlyMemory<byte> assetOperation, DeepIdV2ContactPathAuthoritySource.OwnPreKeyAuthoringAuthority own,
         VerifiedDeepIdV2DirectoryFreshness peer, DeepIdV2ContactPathAuthoritySource source, CancellationToken ct, bool routeUpdate = false,
         OwnedRouteHistoryCommand historyCommand = OwnedRouteHistoryCommand.Announcement,
-        ReadOnlyMemory<byte> historySelectionOperation = default)
+        ReadOnlyMemory<byte> historySelectionOperation = default,
+        RouteHistoryPreparation historyPreparation = RouteHistoryPreparation.DurableStaging)
     {
         ArgumentNullException.ThrowIfNull(scope);
         if (operation is { } retryOperation) ProtectedDph2PreClaimJournal.RequireIntent(retryOperation.Span);
@@ -134,6 +135,15 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 journal.RequireCapacity(scope);
                 await RequireNewMailboxWorkCapacityUnderLeaseAsync(current, held, opened, scope, op,
                     own, peer, source, verifier, ct).ConfigureAwait(false);
+                if (historyPreparation == RouteHistoryPreparation.CurrentRequestDispatch)
+                {
+                    if (!routeUpdate || historyCommand != OwnedRouteHistoryCommand.Request)
+                        throw new InvalidOperationException("Immediate history request preparation has another owned purpose.");
+                    // Only fresh explicit dispatch requires a current route
+                    // before authoring. Retained/no-work selection and receive's
+                    // durable staging keep their existing independent semantics.
+                    _ = await ReadAuthenticatedPeerMailboxRouteUnderLeaseAsync(current, opened, own, peer, source, held, ct).ConfigureAwait(false);
+                }
             }
             result = await application.ReconcileOwnedTextOutboxAsync(journal, current.AccountId,
                 BinaryPrimitives.ReadUInt64BigEndian(scope.Exact[84..]), scope, entry is null ? ReadOnlyMemory<byte>.Empty : op, ct).ConfigureAwait(false);

@@ -317,3 +317,34 @@ These receipts establish the bounded source correction, not the precise cause
 of the retained runtime06 profile refusal or its successful recovery. No retained
 profile execution, warm latency result or full Shared qualification is claimed
 by this focused packet. Full Shared has not been run under the goal-first order.
+
+## Current route maintenance and immutable control lifetimes
+
+The read-only current-route API verifies actual native L through the existing
+Protocol/source/consent fences. Fresh immediate history requests verify that
+route before authoring; retained recovery and receive staging keep their owners.
+Expired never-attempted count8 work can acquire only a denial-only stop after
+actual authored/native identity, trusted lower expiry, send/evidence/transport
+absence and retained grant roots are rejoined before and after its authored CAS.
+No Store success, cleanup, grant deletion or replacement response is inferred.
+Settled same-endpoint announcements use Protocol's upper-time window predicate.
+
+Build45 passed with zero warnings/errors, native exit0 and2194 unchanged inputs,
+UTC2026-11-05T00:15:03.197–00:15:10.516 (7.318s). Actual focused receipts:
+
+| Receipt | Passed / failed / skipped | Native seconds | Inputs unchanged |
+| --- | --- | ---: | --- |
+| `artifacts/archive-resume-20261104-qualification24` | 8 / 3 / 0 | 448.108 | 2336 |
+| `artifacts/archive-resume-20261104-qualification25` | 2 / 1 / 0 | 89.272 | 2336 |
+| `artifacts/archive-resume-20261104-qualification26` | 1 / 0 / 0 | 6.116 | 2336 |
+
+The original failed receipts remain unchanged. Their exact corrections were:
+
+- `Did2RouteMaintenance_SettledExpiredAnnouncementAllowsFreshSameEndpointButPendingOriginalAlwaysWins`: q24 exposed the selector's lower/upper mismatch; the corrected production predicate passed q25.
+- `Did2CurrentRoute_ReadOnlyAdmissionAndFreshRequestRejectExpiredActualAnnouncementBeforeAuthoring`: q24 confused signed DTT issuance expiry with the longer verified capability deadline. The corrected fixture passed q25 and also requires an actual announcement beyond120s, within signed ceilings, with fresh nonce verification and immutable original bytes.
+- `Did2LogicalAssignment_RouteControlIgnoresExpiredSnapshotButNotSignedRouteExpiry`: q24's successor changed stable signed invite scope; q25 then reached the intended final callback but expected the base exception type. q26 passed with exact `AccountDirectoryFreshnessVerificationException` / `DirectoryFreshnessExpired` and two clock reads, plus signed-route expiry rejection and mode1 lifetime bounds.
+
+All11 selected identities have passing evidence across these receipts; the eight
+already passed cases were not repeated solely for the fixes. This is focused
+source evidence. Matching retained target execution, warm delivery/ACK timing and
+the canonical full Shared gate remain pending; no full or target pass is claimed.

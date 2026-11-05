@@ -14,6 +14,7 @@ namespace Deep.Client.Shared.Persistence.DeviceV2;
 internal sealed partial class ProtectedDeepIdV2AccountOwner
 {
     private enum OwnedRouteHistoryCommand { Announcement, Request, Response }
+    private enum RouteHistoryPreparation { DurableStaging, CurrentRequestDispatch }
     private sealed class RouteHistoryWorkNotRequiredException(string? message = null) : InvalidOperationException(message) { }
     private sealed class RouteHistoryRequestUnmatchedException : Exception { }
 
@@ -21,13 +22,26 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         Did2MessagingSessionScope scope, bool response, ReadOnlyMemory<byte> receivedOperation,
         DeepIdV2ContactPathAuthoritySource.OwnPreKeyAuthoringAuthority own, VerifiedDeepIdV2DirectoryFreshness peer,
         DeepIdV2ContactPathAuthoritySource source, CancellationToken ct)
+        => await PrepareRouteHistoryCommandCoreAsync(seconds, verifier, scope, response, receivedOperation,
+            own, peer, source, ct, RouteHistoryPreparation.DurableStaging).ConfigureAwait(false);
+
+    internal Task<DirectTextOutboxEntry?> PrepareRouteHistoryRequestForDispatchAsync(ulong seconds, IDeepMlDsa65Verifier verifier,
+        Did2MessagingSessionScope scope, DeepIdV2ContactPathAuthoritySource.OwnPreKeyAuthoringAuthority own,
+        VerifiedDeepIdV2DirectoryFreshness peer, DeepIdV2ContactPathAuthoritySource source, CancellationToken ct)
+        => PrepareRouteHistoryCommandCoreAsync(seconds, verifier, scope, false, ReadOnlyMemory<byte>.Empty,
+            own, peer, source, ct, RouteHistoryPreparation.CurrentRequestDispatch);
+
+    private async Task<DirectTextOutboxEntry?> PrepareRouteHistoryCommandCoreAsync(ulong seconds, IDeepMlDsa65Verifier verifier,
+        Did2MessagingSessionScope scope, bool response, ReadOnlyMemory<byte> receivedOperation,
+        DeepIdV2ContactPathAuthoritySource.OwnPreKeyAuthoringAuthority own, VerifiedDeepIdV2DirectoryFreshness peer,
+        DeepIdV2ContactPathAuthoritySource source, CancellationToken ct, RouteHistoryPreparation preparation)
     {
         if (response || !receivedOperation.IsEmpty) ProtectedDph2PreClaimJournal.RequireIntent(receivedOperation.Span);
         try
         {
             return await PrepareDirectAuthoredAsync(seconds, verifier, scope, null, null, ReadOnlyMemory<byte>.Empty,
                 own, peer, source, ct, routeUpdate: true,
-                response ? OwnedRouteHistoryCommand.Response : OwnedRouteHistoryCommand.Request, receivedOperation).ConfigureAwait(false);
+                response ? OwnedRouteHistoryCommand.Response : OwnedRouteHistoryCommand.Request, receivedOperation, preparation).ConfigureAwait(false);
         }
         catch (RouteHistoryWorkNotRequiredException) { return null; }
         catch (RouteHistoryRequestUnmatchedException) { return null; }

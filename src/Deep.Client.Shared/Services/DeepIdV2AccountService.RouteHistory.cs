@@ -33,7 +33,9 @@ public sealed partial class DeepIdV2AccountService
         ReadOnlyMemory<byte> receivedOperation, DeepIdV2ContactPathAuthoritySource source, CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(conversation); ArgumentNullException.ThrowIfNull(source);
-        using var command = await PrepareOwnRouteHistoryCommandAsync(conversation.Scope, response, receivedOperation, source, ct).ConfigureAwait(false);
+        using var command = response
+            ? await PrepareOwnRouteHistoryCommandAsync(conversation.Scope, true, receivedOperation, source, ct).ConfigureAwait(false)
+            : await PrepareOwnRouteHistoryRequestForDispatchAsync(conversation.Scope, source, ct).ConfigureAwait(false);
         if (command is null) return 0;
         using var native = await SendOwnedMessagingCoreAsync(conversation.Scope, command.OperationId,
             command.ExactDmc2, source, ct, routeControl: true).ConfigureAwait(false);
@@ -43,6 +45,16 @@ public sealed partial class DeepIdV2AccountService
 
     internal async Task<DirectTextOutboxEntry?> PrepareOwnRouteHistoryCommandAsync(Did2MessagingSessionScope scope, bool response,
         ReadOnlyMemory<byte> receivedOperation, DeepIdV2ContactPathAuthoritySource source, CancellationToken ct)
+        => await PrepareOwnRouteHistoryCommandCoreAsync(scope, response, receivedOperation, source, ct,
+            immediateRequestDispatch: false).ConfigureAwait(false);
+
+    internal Task<DirectTextOutboxEntry?> PrepareOwnRouteHistoryRequestForDispatchAsync(Did2MessagingSessionScope scope,
+        DeepIdV2ContactPathAuthoritySource source, CancellationToken ct)
+        => PrepareOwnRouteHistoryCommandCoreAsync(scope, false, ReadOnlyMemory<byte>.Empty, source, ct,
+            immediateRequestDispatch: true);
+
+    private async Task<DirectTextOutboxEntry?> PrepareOwnRouteHistoryCommandCoreAsync(Did2MessagingSessionScope scope, bool response,
+        ReadOnlyMemory<byte> receivedOperation, DeepIdV2ContactPathAuthoritySource source, CancellationToken ct, bool immediateRequestDispatch)
     {
         ArgumentNullException.ThrowIfNull(scope); ArgumentNullException.ThrowIfNull(source); source.RequireAccountOwner(this);
         if (response || !receivedOperation.IsEmpty) ProtectedDph2PreClaimJournal.RequireIntent(receivedOperation.Span);
@@ -51,6 +63,9 @@ public sealed partial class DeepIdV2AccountService
         {
             var pair = await source.VerifyForOwnMessagingAsync(this, scope, ct).ConfigureAwait(false);
             using var verifier = OpenVerifier();
+            if (immediateRequestDispatch)
+                return await owner.PrepareRouteHistoryRequestForDispatchAsync(TrustedUnixSeconds(), verifier, scope,
+                    pair.Own, pair.Peer, source, ct).ConfigureAwait(false);
             return await owner.PrepareRouteHistoryCommandAsync(TrustedUnixSeconds(), verifier, scope, response, selected,
                 pair.Own, pair.Peer, source, ct).ConfigureAwait(false);
         }

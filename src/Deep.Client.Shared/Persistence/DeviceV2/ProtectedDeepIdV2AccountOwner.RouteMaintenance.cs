@@ -65,6 +65,18 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             using var publication = await OpenOwnPermanentMailboxPublicationUnderLeaseAsync(current, held, source, own, ct).ConfigureAwait(false);
             result = FixedRoute(head.ExactRoute.Span, publication.Route.ExactRouteClosure.Span) ? null : [];
             await publication.RecheckAsync(ct).ConfigureAwait(false);
+            if (result is null && !head.Announcement.IsEmpty)
+            {
+                // Settled history is immutable. A fresh uncorrelated announcement
+                // can advertise the same endpoint when its last count8 envelope
+                // no longer covers this interval; active originals above always win.
+                var reading = await RecheckRouteFreshnessAsync(current, source, own, held, null, ct).ConfigureAwait(false);
+                var message = ApplicationCoreCodec.DecodeDmc2(head.Announcement.Span);
+                var upper = checked(own.Proof.TrustedUpperUnixSeconds + reading.SampleSeconds - own.Proof.MonotonicSample);
+                if (message.CreatedAtUnixMilliseconds > checked(upper * 1000) ||
+                    message.ExpiresAtUnixMilliseconds == 0 || checked(upper * 1000) >= message.ExpiresAtUnixMilliseconds)
+                    result = [];
+            }
         }
         try
         {
