@@ -119,6 +119,10 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             [ProtectedDid2MessagingSessionCatalog.Slot] = catalogHash,
             [ProtectedDid2MessagingArchiveEnrollment.Slot] = null
         };
+        // Root2 already commits each retained entry hash. Validate mandatory
+        // physical originals and guard those same objects throughout this
+        // readback; no alternate root or new compaction digest is introduced.
+        await GuardRetainedAcquisitionCustodyUnderLeaseAsync(account, instance, held, guards, ct).ConfigureAwait(false);
         if (!jointPath && !stopped)
         using (var application = await SqliteDeepIdV2AccountGeneration.OpenExistingApplicationForOwnerUnderLeaseAsync(
             storage, sqlStatePath, networkId, account, instance, held, lease, ct).ConfigureAwait(false))

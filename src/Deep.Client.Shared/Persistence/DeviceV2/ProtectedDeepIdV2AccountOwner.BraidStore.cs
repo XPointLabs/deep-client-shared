@@ -140,6 +140,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 throw new CryptographicException("Historical control Store changed its committed frame.");
             await RequireExactProtectedMailboxRootAsync(ProtectedDid2MailboxSendJournal.Slot, sendRoot, ct).ConfigureAwait(false);
             await RecheckRouteFreshnessAsync(current, source, own, held, first, ct).ConfigureAwait(false);
+            await selected.RecheckAsync(ct).ConfigureAwait(false);
             ct.ThrowIfCancellationRequested(); held.RequireOwner(lease);
             return new(receipt.Cursor, receipt.Disposition, false, receipt.CoordinatorReceipt.CoordinatorId.Span);
         }

@@ -130,6 +130,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
     {
         ProtectedDph2PreClaimJournal.RequireIntent(operation.Span);
         var op = operation.ToArray(); byte[] snapshot = [], grantRoot = [], instance = [], exactMau = [], envelopeBytes = [], attemptId = [];
+        OriginalDepositAcquisition? originalAcquisition = null;
         try
         {
             using var held = await lease.AcquireAsync(ct).ConfigureAwait(false);
@@ -225,6 +226,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 entry is null ? null : entry.GrantHash.ToArray(), current, instance, held, source, fresh, ct).ConfigureAwait(false);
             async Task Recheck(CancellationToken token)
             {
+                if (originalAcquisition is not null) await originalAcquisition.RecheckAsync(token).ConfigureAwait(false);
                 await RequireFinalMessagingFreshnessAsync(current, scope, fresh, peer, source, held, first, token).ConfigureAwait(false);
                 await RequireMailboxRetryTimeUnderLeaseAsync(current, source, fresh, held,
                     Math.Min(applicationRetryUntil, sends.Current(scope.Hash, op)?.RetryUntil ?? ulong.MaxValue), token).ConfigureAwait(false);
@@ -265,8 +267,10 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 grantRoot = root.Use(bytes => bytes.ToArray());
             using var grantState = ProtectedDid2MailboxGrantJournal.Decode(grantRoot, networkId, current.AccountId.Span, instance);
             var grantName = Convert.ToHexString(ProtectedDid2MailboxGrantJournal.Scope(routeHash, locator.Span, (byte)MailboxCapabilityDomain.Deposit));
+            if (entry is not null) originalAcquisition = await ReadOriginalDepositAcquisitionUnderLeaseAsync(held,
+                current.AccountId, instance, grantRoot, entry.GrantHash.ToArray(), ct, grantName).ConfigureAwait(false);
             var retainedGrant = entry is not null
-                ? ProtectedDid2MailboxGrantJournal.RequireRetainedWinner(grantState, grantName, entry.GrantHash)
+                ? originalAcquisition!.Entry
                 : ProtectedDid2MailboxGrantJournal.CurrentWinner(grantState, grantName) ??
                     throw new CryptographicException("Dispatch has no selected protected grant winner.");
             if (winner is not null && !FixedRoute(ProtectedDid2MailboxGrantJournal.Response(retainedGrant).Span, winner.ExactXmc2.Span))
@@ -528,7 +532,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             }
             finally { CryptographicOperations.ZeroMemory(ciphertext); }
         }
-        finally { foreach (var value in new[] { op, snapshot, grantRoot, instance, exactMau, envelopeBytes, attemptId }) CryptographicOperations.ZeroMemory(value); }
+        finally { originalAcquisition?.Dispose(); foreach (var value in new[] { op, snapshot, grantRoot, instance, exactMau, envelopeBytes, attemptId }) CryptographicOperations.ZeroMemory(value); }
     }
 
     // Denial-only preflight for a new ordinary command / ratchet transition.
@@ -625,8 +629,16 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             throw new InvalidDataException("Protected grant custody is absent during replay-floor preflight.");
         using var state = root.Use(bytes => ProtectedDid2MailboxGrantJournal.Decode(bytes, networkId, current.AccountId.Span, instance));
         var name = Convert.ToHexString(ProtectedDid2MailboxGrantJournal.Scope(routeHash, locator.Span, (byte)MailboxCapabilityDomain.Deposit));
+        var exactRoot = root.Use(bytes => bytes.ToArray());
+        using var original = await ReadOriginalAsync().ConfigureAwait(false);
+        async Task<OriginalDepositAcquisition?> ReadOriginalAsync()
+        {
+            try { return originalGrant is null ? null : await ReadOriginalDepositAcquisitionUnderLeaseAsync(held,
+                current.AccountId, instance, exactRoot, originalGrant, ct, name).ConfigureAwait(false); }
+            finally { CryptographicOperations.ZeroMemory(exactRoot); }
+        }
         var winner = originalGrant is not null
-            ? ProtectedDid2MailboxGrantJournal.RequireRetainedWinner(state, name, originalGrant)
+            ? original!.Entry
             : ProtectedDid2MailboxGrantJournal.AcquisitionForNewWork(state, name);
         if (winner is null || !ProtectedDid2MailboxGrantJournal.HasWinner(winner))
             throw new IOException("Protected mailbox replay floors are full; issuance cannot start.");
@@ -645,6 +657,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         }
         var response = ContactCodec.Decode("XMC2", ProtectedDid2MailboxGrantJournal.Response(winner).Span);
         sends.RequireGrant(MailboxAuthenticatedCapabilityCodec.DecodeGrant(response.Field(8).Span));
+        if (original is not null) await original.RecheckAsync(ct).ConfigureAwait(false);
         ct.ThrowIfCancellationRequested(); held.RequireActive();
     }
 

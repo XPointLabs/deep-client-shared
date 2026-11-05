@@ -67,9 +67,9 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             if (!sends.Entries.TryGetValue(Convert.ToHexString(ProtectedDid2MailboxSendJournal.Key(scope.Hash, attempt)), out var entry) ||
                 !entry.Prepared || !FixedRoute(entry.Operation, op) || !FixedRoute(entry.Attempt, attempt))
                 throw new CryptographicException("Late Store cannot invent a prepared original attempt.");
-            var acquisition = grants.Entries.Values.SingleOrDefault(value => ProtectedDid2MailboxGrantJournal.HasWinner(value) &&
-                FixedRoute(SHA256.HashData(ContactCodec.Decode("XMC2", ProtectedDid2MailboxGrantJournal.Response(value).Span).Field(8).Span),
-                    entry.GrantHash)) ?? throw new CryptographicException("Late Store lost its original acquisition winner.");
+            using var original = await ReadOriginalDepositAcquisitionUnderLeaseAsync(held, current.AccountId, scope.Instance.ToArray(),
+                grantRoot, entry.GrantHash.ToArray(), ct).ConfigureAwait(false);
+            var acquisition = original.Entry;
             var (grant, route) = await RequireOriginalAttemptGrantAsync(entry, acquisition, own, source, scope, ct).ConfigureAwait(false);
             RequireOriginalAttemptBody(entry, grant, route, scope, envelope); sends.RequireGrant(grant);
             if (sends.MinimumCounter(entry.GrantHash) <= entry.Counter)
@@ -107,7 +107,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             {
                 await RecheckRouteFreshnessAsync(current, source, own, held, first, token).ConfigureAwait(false);
                 await RequireExactProtectedMailboxRootAsync(ProtectedDid2MailboxSendJournal.Slot, sendRoot, token).ConfigureAwait(false);
-                await RequireExactProtectedMailboxRootAsync(ProtectedDid2MailboxGrantJournal.Slot, grantRoot, token).ConfigureAwait(false);
+                await original.RecheckAsync(token).ConfigureAwait(false);
                 var final = await opened.Custody.ReconcileAsync(token).ConfigureAwait(false);
                 if (!FixedRoute(final.Exact.Span, floor.Exact.Span))
                     throw new CryptographicException("Native custody changed during original Store settlement.");

@@ -1,5 +1,6 @@
 using System.Buffers.Binary;
 using System.Security.Cryptography;
+using Deep.Protocol.ApplicationCore;
 using Deep.Client.Shared.Services.ContactV2;
 using Deep.Protocol.ContactV1;
 using Deep.Protocol.ContactV2;
@@ -14,7 +15,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
     // Complete original custody stays authenticated; every replay floor and all
     // native/application SQL remain unchanged. Unknown/selected work stays live.
     private async Task SealInactiveMailboxAcquisitionsUnderLeaseAsync(VerifiedDeepIdV2CurrentAccount current,
-        HeldDeepIdV2AccountLease held, ReadOnlyMemory<byte> instance, DeepIdV2ContactPathAuthoritySource source,
+        HeldDeepIdV2AccountLease held, IDeepMlDsa65Verifier verifier, ReadOnlyMemory<byte> instance, DeepIdV2ContactPathAuthoritySource source,
         DeepIdV2ContactPathAuthoritySource.OwnPreKeyAuthoringAuthority fresh, CancellationToken ct)
     {
         held.RequireOwner(lease);
@@ -22,6 +23,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         var before = raw.Use(bytes => bytes.ToArray());
         byte[] replacement = [];
         var copies = new List<(string Slot, byte[] Bytes)>();
+        var pinnedProofs = new List<(byte[] Grant, DepositSendArchiveProof Proof)>();
         try
         {
             using var grants = ProtectedDid2MailboxGrantJournal.Decode(before, networkId, current.AccountId.Span, instance.Span);
@@ -43,7 +45,12 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 grants.Retained.Count < ProtectedDid2MailboxGrantJournal.MaximumRetained; batch++)
             {
                 string? selected = null;
-                foreach (var pair in grants.Entries)
+                var referenceCounts = sends.Entries.Values.GroupBy(send => Convert.ToHexString(send.GrantHash), StringComparer.Ordinal)
+                    .ToDictionary(group => group.Key, group => group.Count(), StringComparer.Ordinal);
+                foreach (var pair in grants.Entries.Where(pair => ProtectedDid2MailboxGrantJournal.IsAdoptedWinner(pair.Value))
+                    .OrderBy(pair => referenceCounts.GetValueOrDefault(Convert.ToHexString(SHA256.HashData(ContactCodec.Decode("XMC2",
+                        ProtectedDid2MailboxGrantJournal.Response(pair.Value).Span).Field(8).Span))))
+                    .ThenBy(pair => pair.Key, StringComparer.Ordinal))
                 {
                     byte[] entry;
                     try { entry = ProtectedDid2MailboxGrantJournal.RequireSealableOldest(grants, Convert.FromHexString(pair.Key)); }
@@ -51,14 +58,26 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                     var exactGrant = ContactCodec.Decode("XMC2", ProtectedDid2MailboxGrantJournal.Response(entry).Span).Field(8);
                     var grant = MailboxAuthenticatedCapabilityCodec.DecodeGrant(exactGrant.Span);
                     var hash = SHA256.HashData(exactGrant.Span);
-                    if (lower < grant.ExpiresAtUnixSeconds || !HasRetainedAcquisitionFloor(sends, reads, hash, grant.Domain) ||
-                        sends.Entries.Values.Any(send => FixedRoute(send.GrantHash, hash))) continue;
+                    if (lower < grant.ExpiresAtUnixSeconds || !HasRetainedAcquisitionFloor(sends, reads, hash, grant.Domain)) continue;
                     // Closed Retrieve/ACK custody remains exact and historical.
                     // Its reader joins the immutable sealed original; this move
                     // neither releases its counter nor permits a new effect.
                     if (reads.Closed.Values.Any(read => FixedRoute(read.Grant, hash)) &&
                         (grant.Domain != MailboxCapabilityDomain.Retrieve ||
                          !ProtectedDid2MailboxGrantJournal.HasReservedReadIntent(entry))) continue;
+                    var sendReferences = sends.Entries.Values.Where(send => FixedRoute(send.GrantHash, hash)).ToArray();
+                    if (sendReferences.Length != 0)
+                    {
+                        // At the unchanged working ceiling, an exact prepared
+                        // Store may retain its original holder in the existing
+                        // archive. Every reference, floor and SQL/native body is
+                        // authenticated again before CAS and after cold readback.
+                        // Pending requests remain working; nothing is retired.
+                        if (grants.Entries.Count != ProtectedDid2MailboxGrantJournal.MaximumEntries ||
+                            grant.Domain != MailboxCapabilityDomain.Deposit || sendReferences.Any(send => !send.Prepared || send.Counter == 0)) continue;
+                        var proof = await ProveDepositArchiveSendsUnderLeaseAsync(current, held, verifier, instance, entry, sends, source, fresh, ct).ConfigureAwait(false);
+                        pinnedProofs.Add((hash.ToArray(), proof));
+                    }
                     selected = pair.Key; break;
                 }
                 if (selected is null) break;
@@ -66,6 +85,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 var retained = ProtectedDid2MailboxGrantJournal.StageSealedOldest(grants, acquisition,
                     networkId, current.AccountId.Span, instance.Span);
                 copies.Add((ProtectedDid2MailboxGrantJournal.RetainedSlot(acquisition), retained));
+                if (pinnedProofs.Count != 0) break; // One free working slot is sufficient for this pressure call.
             }
             if (copies.Count == 0) return;
             replacement = ProtectedDid2MailboxGrantJournal.Encode(grants, networkId, current.AccountId.Span, instance.Span);
@@ -82,7 +102,10 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                     [ProtectedDid2MailboxReadJournal.Slot] = SHA256.HashData(readBefore),
                     [ProtectedDid2MailboxGrantJournal.Slot] = SHA256.HashData(before)
                 };
+                foreach (var proof in pinnedProofs) proof.Proof.AddGuards(guards);
                 using (var joined = await storage.ReadOwnedGuardedBatchAsync([], guards, ct).ConfigureAwait(false)) { }
+                await RecheckPinnedOriginalsAsync(before).ConfigureAwait(false);
+                await RecheckRouteFreshnessAsync(current, source, fresh, held, null, ct).ConfigureAwait(false);
                 if (!await storage.CompareExchangeAndInsertAsync(ProtectedDid2MailboxGrantJournal.Slot, before,
                     replacement, copies.Select(copy => new DeepSecureStorageWrite(copy.Slot, copy.Bytes)).ToArray(), ct).ConfigureAwait(false))
                     throw new CryptographicException("Sealed acquisition conflicts with its exact working predecessor or existing custody.");
@@ -93,6 +116,21 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 foreach (var copy in copies)
                     guards.Add(copy.Slot, SHA256.HashData(copy.Bytes));
                 using (var joined = await storage.ReadOwnedGuardedBatchAsync([], guards, ct).ConfigureAwait(false)) { }
+                await RecheckPinnedOriginalsAsync(replacement).ConfigureAwait(false);
+                using (var joined = await storage.ReadOwnedGuardedBatchAsync([], guards, ct).ConfigureAwait(false)) { }
+
+                async Task RecheckPinnedOriginalsAsync(ReadOnlyMemory<byte> exactRoot)
+                {
+                    foreach (var pinned in pinnedProofs)
+                    {
+                        using var original = await ReadOriginalDepositAcquisitionUnderLeaseAsync(held, current.AccountId, instance,
+                            exactRoot, pinned.Grant, ct).ConfigureAwait(false);
+                        using var proof = await ProveDepositArchiveSendsUnderLeaseAsync(current, held, verifier, instance, original.Entry, sends, source, fresh, ct).ConfigureAwait(false);
+                        if (!FixedRoute(proof.Digest, pinned.Proof.Digest))
+                            throw new CryptographicException("Deposit archival changed an exact retained Store reference.");
+                        await original.RecheckAsync(ct).ConfigureAwait(false);
+                    }
+                }
             }
             finally { CryptographicOperations.ZeroMemory(sendBefore); CryptographicOperations.ZeroMemory(readBefore); }
         }
@@ -100,6 +138,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         {
             CryptographicOperations.ZeroMemory(before); CryptographicOperations.ZeroMemory(replacement);
             foreach (var copy in copies) CryptographicOperations.ZeroMemory(copy.Bytes);
+            foreach (var pinned in pinnedProofs) { CryptographicOperations.ZeroMemory(pinned.Grant); pinned.Proof.Dispose(); }
         }
     }
 
@@ -171,7 +210,8 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                     var grant = MailboxAuthenticatedCapabilityCodec.DecodeGrant(ContactCodec.Decode("XMC2", ProtectedDid2MailboxGrantJournal.Response(entry).Span).Field(8).Span);
                     if (!HasRetainedAcquisitionFloor(sends, reads, reference.GrantHash, grant.Domain))
                         throw new CryptographicException("Sealed acquisition lost its independent replay floor.");
-                    if (reads.Closed.Values.Any(read => FixedRoute(read.Grant, reference.GrantHash))) continue;
+                    if (reads.Closed.Values.Any(read => FixedRoute(read.Grant, reference.GrantHash)) ||
+                        sends.Entries.Values.Any(send => FixedRoute(send.GrantHash, reference.GrantHash))) continue;
                     try { replacement = ProtectedDid2MailboxGrantJournal.RestoreRetainedOldest(grants, pair.Key, entry, networkId, current.AccountId.Span, instance.Span); }
                     catch (IOException) { continue; } // Pure structural pins, before any effect.
 #if DEEP_TEST_INTERNALS

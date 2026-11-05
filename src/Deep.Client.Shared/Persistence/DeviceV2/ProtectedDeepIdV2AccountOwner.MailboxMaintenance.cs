@@ -33,7 +33,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 if (reads.Active is not null || reads.Phase != 0) return;
             _ = await CloseExpiredMailboxAcquisitionsUnderLeaseAsync(current, held, source, fresh, ct).ConfigureAwait(false);
             await MaintainRetainedMailboxAcquisitionsUnderLeaseAsync(current, held, instance, source, fresh, ct).ConfigureAwait(false);
-            await SealInactiveMailboxAcquisitionsUnderLeaseAsync(current, held, instance, source, fresh, ct).ConfigureAwait(false);
+            await SealInactiveMailboxAcquisitionsUnderLeaseAsync(current, held, verifier, instance, source, fresh, ct).ConfigureAwait(false);
 
             // One dependency-closed namespace pair per business call, not32
             // separate plans borrowing the same short directory freshness.

@@ -128,7 +128,9 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             await RequireExactProtectedMailboxRootAsync(ProtectedDid2MailboxSendJournal.Slot, sendRoot, ct).ConfigureAwait(false);
             await RequireExactProtectedMailboxRootAsync(ProtectedDid2MessagingPeerBootstrap.Slot(scope), peerRoot, ct).ConfigureAwait(false);
             await RecheckRouteFreshnessAsync(current, source, own, held, first, ct).ConfigureAwait(false);
+            await selected.RecheckAsync(ct).ConfigureAwait(false);
             await RetainContactStoreCompletionUnderLeaseAsync(current, held, scope, operation, own, source, ct).ConfigureAwait(false);
+            await selected.RecheckAsync(ct).ConfigureAwait(false);
             ct.ThrowIfCancellationRequested(); held.RequireOwner(lease);
             return new(receipt.Cursor, receipt.Disposition, false, receipt.CoordinatorReceipt.CoordinatorId.Span);
         }

@@ -336,10 +336,15 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             // Keep the actual acquisition join while removing its working send.
             // Historical verification above authenticates original policy/keys;
             // no newest issuer or renewed peer route substitutes for them.
-            var acquisition = grants.Entries.Values.SingleOrDefault(value =>
-                ProtectedDid2MailboxGrantJournal.HasWinner(value) &&
-                FixedRoute(ContactCodec.Decode("XMC2", ProtectedDid2MailboxGrantJournal.Response(value).Span).Field(8).Span, grantBytes)) ??
-                throw new CryptographicException("Original send lost its exact acquisition winner.");
+            var root = ProtectedDid2MailboxGrantJournal.Encode(grants, scope.Network, scope.LocalAccount, scope.Instance);
+            using var original = await ReadOriginalDepositAsync().ConfigureAwait(false);
+            var acquisition = original.Entry;
+            async Task<OriginalDepositAcquisition> ReadOriginalDepositAsync()
+            {
+                try { return await ReadOriginalDepositAcquisitionUnderLeaseAsync(held, current.AccountId, scope.Instance.ToArray(),
+                    root, send.GrantHash.ToArray(), ct).ConfigureAwait(false); }
+                finally { CryptographicOperations.ZeroMemory(root); }
+            }
             if (!FixedRoute(ProtectedDid2MailboxGrantJournal.OriginalPolicy(acquisition).Span, evidence.ExactPma.Span) ||
                 !FixedRoute(ProtectedDid2MailboxGrantJournal.OriginalRoute(acquisition).Span, route.ExactBytes.Span))
                 throw new CryptographicException("Original acquisition differs from independent public/native custody.");
@@ -355,6 +360,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 await RequireOriginalInitialStoreRecipientUnderLeaseAsync(current, held, opened, scope, initialIntent,
                     evidence, nativeEnvelope, exact, receipt, own.Authority,
                     initialVerifier ?? throw new CryptographicException("Initial chain lost its live approved verifier."), ct).ConfigureAwait(false);
+            await original.RecheckAsync(ct).ConfigureAwait(false);
             ct.ThrowIfCancellationRequested(); held.RequireOwner(lease);
         }
         finally { CryptographicOperations.ZeroMemory(exact); }

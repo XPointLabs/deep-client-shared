@@ -213,6 +213,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             await RequireExactProtectedMailboxRootAsync(ProtectedDid2MailboxSendJournal.Slot, sendRoot, ct).ConfigureAwait(false);
             await RequireExactProtectedMailboxRootAsync(ProtectedDid2ContactAcceptJournal.Slot, acceptanceRoot, ct).ConfigureAwait(false);
             await RecheckRouteFreshnessAsync(current, source, own, held, first, ct).ConfigureAwait(false);
+            await selected.RecheckAsync(ct).ConfigureAwait(false);
             if (recoverOrdinaryCompletion)
             {
                 // Working (not yet Stored) custody cannot have been retired.
@@ -232,6 +233,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
 #if DEEP_TEST_INTERNALS
                 Did2MailboxSendTestHooks.Hit(Did2MailboxSendFailpoint.BeforeOrdinaryCompletion);
 #endif
+                await selected.RecheckAsync(ct).ConfigureAwait(false);
                 await RetainOrdinaryStoreCompletionUnderLeaseAsync(current, held, opened, scope, operation, selected.Attempt, metadata, own, source, ct).ConfigureAwait(false);
 #if DEEP_TEST_INTERNALS
                 Did2MailboxSendTestHooks.Hit(Did2MailboxSendFailpoint.AfterOrdinaryCompletion);
@@ -240,6 +242,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             }
             if (acceptance is not null)
                 await RetainContactStoreCompletionUnderLeaseAsync(current, held, scope, operation, own, source, ct).ConfigureAwait(false);
+            await selected.RecheckAsync(ct).ConfigureAwait(false);
             ct.ThrowIfCancellationRequested(); held.RequireOwner(lease);
             return new(receipt.Cursor, receipt.Disposition, false, receipt.CoordinatorReceipt.CoordinatorId.Span);
         }

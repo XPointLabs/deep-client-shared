@@ -47,6 +47,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         using var grantRoot = await storage.ReadOwnedAsync(ProtectedDid2MailboxGrantJournal.Slot, ct).ConfigureAwait(false) ??
             throw new InvalidDataException("Replacement work lost original acquisition custody.");
         var originalGrants = grantRoot.Use(bytes => bytes.ToArray());
+        var originals = new List<OriginalDepositAcquisition>();
         try
         {
             using var grants = ProtectedDid2MailboxGrantJournal.Decode(originalGrants, networkId, current.AccountId.Span, instance);
@@ -78,11 +79,10 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 }
                 if (lower < entry.ClosedAtLower || entry.ClosedAtLower < entry.AdmissionUntil)
                     throw new CryptographicException("Replacement work has no independently current original admission closure.");
-                var acquisition = grants.Entries.Values.SingleOrDefault(value =>
-                    ProtectedDid2MailboxGrantJournal.HasWinner(value) && FixedRoute(SHA256.HashData(
-                        ContactCodec.Decode("XMC2", ProtectedDid2MailboxGrantJournal.Response(value).Span).Field(8).Span), entry.GrantHash)) ??
-                    throw new CryptographicException("Replacement work lost an original exact acquisition winner.");
-                var (grant, route) = await RequireOriginalAttemptGrantAsync(entry, acquisition, own, source, scope, ct).ConfigureAwait(false);
+                var original = await ReadOriginalDepositAcquisitionUnderLeaseAsync(held, current.AccountId, instance,
+                    originalGrants, entry.GrantHash.ToArray(), ct).ConfigureAwait(false);
+                originals.Add(original);
+                var (grant, route) = await RequireOriginalAttemptGrantAsync(entry, original.Entry, own, source, scope, ct).ConfigureAwait(false);
                 var originalNativeRoute = nativeRoute ?? await ReadAttemptStorePeerRouteAsync(current, held, opened,
                     application, operation, entry.Attempt.ToArray(), route, own, source, ct).ConfigureAwait(false);
                 if (!FixedRoute(route.ExactBytes.Span, originalNativeRoute.ExactBytes.Span))
@@ -115,10 +115,11 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             if (!FixedRoute(floor.Exact.Span, finalFloor.Exact.Span))
                 throw new CryptographicException("Native custody changed during replacement preflight.");
             await RequireExactProtectedMailboxRootAsync(ProtectedDid2MailboxGrantJournal.Slot, originalGrants, ct).ConfigureAwait(false);
+            foreach (var original in originals) await original.RecheckAsync(ct).ConfigureAwait(false);
             await RequireExactProtectedMailboxRootAsync(ProtectedDid2MailboxSendJournal.Slot, snapshot, ct).ConfigureAwait(false);
             ct.ThrowIfCancellationRequested(); held.RequireOwner(lease);
         }
-        finally { CryptographicOperations.ZeroMemory(originalGrants); }
+        finally { foreach (var original in originals) original.Dispose(); CryptographicOperations.ZeroMemory(originalGrants); }
     }
 
     // The evidence writer never receives a caller-selected trusted attempt.
@@ -192,11 +193,9 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         try
         {
             using var grants = ProtectedDid2MailboxGrantJournal.Decode(originalGrants, networkId, current.AccountId.Span, instance);
-            var acquisition = grants.Entries.Values.SingleOrDefault(value =>
-                ProtectedDid2MailboxGrantJournal.HasWinner(value) && FixedRoute(
-                    SHA256.HashData(ContactCodec.Decode("XMC2", ProtectedDid2MailboxGrantJournal.Response(value).Span).Field(8).Span), entry.GrantHash)) ??
-                throw new CryptographicException("Attempt closure lost its exact acquisition winner.");
-            var (grant, originalRoute) = await RequireOriginalAttemptGrantAsync(entry, acquisition, own, source, scope, ct).ConfigureAwait(false);
+            using var original = await ReadOriginalDepositAcquisitionUnderLeaseAsync(held, current.AccountId, instance,
+                originalGrants, entry.GrantHash.ToArray(), ct).ConfigureAwait(false);
+            var (grant, originalRoute) = await RequireOriginalAttemptGrantAsync(entry, original.Entry, own, source, scope, ct).ConfigureAwait(false);
             sends.RequireGrant(grant);
             using var application = await SqliteDeepIdV2AccountGeneration.OpenApplicationUnderLeaseAsync(
                 storage, sqlStatePath, current, held, ct).ConfigureAwait(false);
@@ -238,13 +237,14 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             var finalFloor = await opened.Custody.ReconcileAsync(ct).ConfigureAwait(false);
             if (!FixedRoute(nativeFloor.Exact.Span, finalFloor.Exact.Span))
                 throw new CryptographicException("Native custody changed during attempt closure.");
-            await RequireExactProtectedMailboxRootAsync(ProtectedDid2MailboxGrantJournal.Slot, originalGrants, ct).ConfigureAwait(false);
+            await original.RecheckAsync(ct).ConfigureAwait(false);
             await RequireExactProtectedMailboxRootAsync(ProtectedDid2MailboxSendJournal.Slot, snapshot, ct).ConfigureAwait(false);
             var closed = entry.CloseUnknown(lower);
             sends.Entries[entry.Name] = closed; entry.Dispose(); sends.Revision = checked(sends.Revision + 1);
 #if DEEP_TEST_INTERNALS
             Did2MailboxSendTestHooks.Hit(Did2MailboxSendFailpoint.BeforeClosureRoot);
 #endif
+            await original.RecheckAsync(ct).ConfigureAwait(false);
             var adopted = await SaveMailboxSendJournalAsync(sends, snapshot, current, instance, held, ct).ConfigureAwait(false);
             try
             {
@@ -253,6 +253,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
 #endif
                 await RecheckRouteFreshnessAsync(current, source, own, held, first, ct).ConfigureAwait(false);
                 await RequireExactProtectedMailboxRootAsync(ProtectedDid2MailboxSendJournal.Slot, adopted, ct).ConfigureAwait(false);
+                await original.RecheckAsync(ct).ConfigureAwait(false);
                 ct.ThrowIfCancellationRequested(); held.RequireOwner(lease); return adopted.ToArray();
             }
             finally { CryptographicOperations.ZeroMemory(adopted); }
