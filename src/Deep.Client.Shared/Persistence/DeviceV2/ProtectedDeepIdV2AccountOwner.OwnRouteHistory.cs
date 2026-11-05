@@ -13,7 +13,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
 {
     private sealed record OwnNativeRouteHead(ParsedDeepIdV2ContactMailboxRoute Original,
         ReadOnlyMemory<byte> ExactRoute, ReadOnlyMemory<byte> EventHash, ReadOnlyMemory<byte> NativeFloor,
-        ReadOnlyMemory<byte> Announcement = default);
+        ReadOnlyMemory<byte> Announcement = default, VerifiedDeepIdV2ContactRouteHistory? PagedFacts = null);
 
     // The caller already holds the account lease and has reconciled the common
     // authored root/SQL mirror. Outgoing metadata never substitutes for the
@@ -22,12 +22,13 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         VerifiedDeepIdV2CurrentAccount current, HeldDeepIdV2AccountLease held, OwnedDid2MessagingStorage opened,
         SqliteDeepMailboxStore application, ProtectedDid2DirectTextJournal.State journal,
         DeepIdV2ContactPathAuthoritySource.OwnPreKeyAuthoringAuthority own,
-        VerifiedDeepIdV2DirectoryFreshness peer, DeepIdV2ContactPathAuthoritySource source, CancellationToken ct)
+        VerifiedDeepIdV2DirectoryFreshness peer, DeepIdV2ContactPathAuthoritySource source, CancellationToken ct,
+        ReadOnlyMemory<byte> expectedAuthoredRoot = default)
     {
         held.RequireOwner(lease); ct.ThrowIfCancellationRequested(); var scope = opened.Scope;
-        var paged = await ReadPagedLiveRouteHistoryUnderLeaseAsync(opened, 1, own, peer, source, held, ct).ConfigureAwait(false);
+        var paged = await ReadPagedLiveRouteHistoryUnderLeaseAsync(opened, 1, own, peer, source, held, ct, expectedAuthoredRoot).ConfigureAwait(false);
         if (paged is not null)
-            return new(paged.Original, paged.Facts.ExactCompletedRoute, paged.EventHash, paged.NativeFloor, paged.Announcement);
+            return new(paged.Original, paged.Facts.ExactCompletedRoute, paged.EventHash, paged.NativeFloor, paged.Announcement, paged.Facts);
         // Authenticate actual native consent below, independently of the
         // latest peer delivery route. Reconstructing own committed history
         // must not need a newly current peer mailbox or remint its route.

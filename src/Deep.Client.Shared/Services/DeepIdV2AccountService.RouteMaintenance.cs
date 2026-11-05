@@ -1,4 +1,5 @@
 using System.Security.Cryptography;
+using Deep.Client.Shared.Persistence;
 using Deep.Client.Shared.Persistence.DeviceV2;
 using Deep.Client.Shared.Services.ContactV1;
 using Deep.Client.Shared.Services.ContactV2;
@@ -42,8 +43,9 @@ public sealed partial class DeepIdV2AccountService
         try
         {
             using var command = selection.Length == 0
-                ? await CreateOwnDirectRouteUpdateAsync(conversation.Scope, source, ct).ConfigureAwait(false)
+                ? await CreateOwnElectiveRouteAnnouncementAsync(conversation.Scope, source, ct).ConfigureAwait(false)
                 : await PrepareOwnDirectRouteUpdateAsync(conversation.Scope, selection, source, ct).ConfigureAwait(false);
+            if (command is null) return 0;
             using var native = await SendOwnedMessagingCoreAsync(conversation.Scope, command.OperationId,
                 command.ExactDmc2, source, ct, routeControl: true).ConfigureAwait(false);
             _ = await DeliverOwnRouteReintroductionWithRecoveryAsync(conversation.Scope, command.OperationId,
@@ -136,13 +138,24 @@ public sealed partial class DeepIdV2AccountService
         try
         {
             using var command = selection.Length == 0
-                ? await CreateOwnDirectRouteUpdateAsync(conversation.Scope, source, ct).ConfigureAwait(false)
+                ? await CreateOwnElectiveRouteAnnouncementAsync(conversation.Scope, source, ct).ConfigureAwait(false)
                 : await PrepareOwnDirectRouteUpdateAsync(conversation.Scope, selection, source, ct).ConfigureAwait(false);
+            if (command is null) return 0;
             using var native = await SendOwnedMessagingCoreAsync(conversation.Scope, command.OperationId,
                 command.ExactDmc2, source, ct, routeControl: true).ConfigureAwait(false);
             _ = await DeliverOwnMessagingAsync(conversation.Scope, command.OperationId, source, ct).ConfigureAwait(false);
             return 1;
         }
         finally { CryptographicOperations.ZeroMemory(selection); }
+    }
+
+    internal async Task<DirectTextOutboxEntry?> CreateOwnElectiveRouteAnnouncementAsync(Did2MessagingSessionScope scope,
+        DeepIdV2ContactPathAuthoritySource source, CancellationToken ct)
+    {
+        source.RequireAccountOwner(this);
+        var pair = await source.VerifyForOwnMessagingAsync(this, scope, ct).ConfigureAwait(false);
+        using var verifier = OpenVerifier();
+        return await owner.PrepareElectiveRouteAnnouncementAsync(TrustedUnixSeconds(), verifier, scope,
+            pair.Own, pair.Peer, source, ct).ConfigureAwait(false);
     }
 }

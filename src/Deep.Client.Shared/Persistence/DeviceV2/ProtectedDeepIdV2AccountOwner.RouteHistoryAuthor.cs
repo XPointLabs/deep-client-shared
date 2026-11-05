@@ -14,9 +14,46 @@ namespace Deep.Client.Shared.Persistence.DeviceV2;
 internal sealed partial class ProtectedDeepIdV2AccountOwner
 {
     private enum OwnedRouteHistoryCommand { Announcement, Request, Response }
-    private enum RouteHistoryPreparation { DurableStaging, CurrentRequestDispatch }
+    private enum RouteHistoryPreparation { DurableStaging, CurrentRequestDispatch, ElectiveAnnouncement }
     private sealed class RouteHistoryWorkNotRequiredException(string? message = null) : InvalidOperationException(message) { }
     private sealed class RouteHistoryRequestUnmatchedException : Exception { }
+
+    internal async Task<DirectTextOutboxEntry?> PrepareElectiveRouteAnnouncementAsync(ulong seconds,
+        IDeepMlDsa65Verifier verifier, Did2MessagingSessionScope scope,
+        DeepIdV2ContactPathAuthoritySource.OwnPreKeyAuthoringAuthority own, VerifiedDeepIdV2DirectoryFreshness peer,
+        DeepIdV2ContactPathAuthoritySource source, CancellationToken ct)
+    {
+        try
+        {
+            return await PrepareDirectAuthoredAsync(seconds, verifier, scope, null, null, ReadOnlyMemory<byte>.Empty,
+                own, peer, source, ct, routeUpdate: true,
+                historyPreparation: RouteHistoryPreparation.ElectiveAnnouncement).ConfigureAwait(false);
+        }
+        catch (RouteHistoryWorkNotRequiredException) { return null; }
+    }
+
+    private async Task RequireElectiveAnnouncementProgressUnderLeaseAsync(VerifiedDeepIdV2CurrentAccount current,
+        OwnedDid2MessagingStorage opened, SqliteDeepMailboxStore application, ProtectedDid2DirectTextJournal.State journal,
+        OwnPermanentMailboxPublication publication, ParsedDmc2 draft, ReadOnlyMemory<byte> authoredRoot,
+        ReadOnlyMemory<byte> expectedNativeFloor,
+        DeepIdV2ContactPathAuthoritySource.OwnPreKeyAuthoringAuthority own, VerifiedDeepIdV2DirectoryFreshness peer,
+        DeepIdV2ContactPathAuthoritySource source, HeldDeepIdV2AccountLease held, CancellationToken ct)
+    {
+        if (draft.ParsedPayload is not ContactRouteHistoryDmc2Payload { Mode: DeepIdV2ContactRouteHistoryMode.Announcement }) return;
+        var reading = await RecheckRouteFreshnessAsync(current, source, own, held, null, ct).ConfigureAwait(false);
+        var head = await ReadOwnNativeRouteHeadUnderLeaseAsync(current, held, opened, application, journal,
+            own, peer, source, ct, authoredRoot).ConfigureAwait(false);
+        if (!FixedRoute(head.NativeFloor.Span, expectedNativeFloor.Span))
+            throw new CryptographicException("Elective announcement changed its actual native predecessor.");
+        if (head.Announcement.IsEmpty || !FixedRoute(head.ExactRoute.Span, publication.Route.ExactRouteClosure.Span)) return;
+        var previous = ApplicationCoreCodec.DecodeDmc2(head.Announcement.Span);
+        var upper = checked(own.Proof.TrustedUpperUnixSeconds + reading.SampleSeconds - own.Proof.MonotonicSample);
+        if (previous.CreatedAtUnixMilliseconds > checked(upper * 1000) ||
+            previous.ExpiresAtUnixMilliseconds == 0 || checked(upper * 1000) >= previous.ExpiresAtUnixMilliseconds) return;
+        if (upper < ProactiveRefreshAt(previous.CreatedAtUnixMilliseconds / 1000, previous.ExpiresAtUnixMilliseconds / 1000) ||
+            draft.ExpiresAtUnixMilliseconds <= previous.ExpiresAtUnixMilliseconds)
+            throw new RouteHistoryWorkNotRequiredException();
+    }
 
     internal async Task<DirectTextOutboxEntry?> PrepareRouteHistoryCommandAsync(ulong seconds, IDeepMlDsa65Verifier verifier,
         Did2MessagingSessionScope scope, bool response, ReadOnlyMemory<byte> receivedOperation,

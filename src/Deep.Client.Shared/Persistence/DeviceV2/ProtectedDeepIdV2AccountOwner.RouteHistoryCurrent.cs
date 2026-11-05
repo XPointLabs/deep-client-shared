@@ -34,7 +34,8 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
     private async Task<PagedRouteHistoryEndpoint?> ReadPagedLiveRouteHistoryUnderLeaseAsync(
         OwnedDid2MessagingStorage opened, byte subject,
         DeepIdV2ContactPathAuthoritySource.OwnPreKeyAuthoringAuthority own, VerifiedDeepIdV2DirectoryFreshness peer,
-        DeepIdV2ContactPathAuthoritySource source, HeldDeepIdV2AccountLease held, CancellationToken ct)
+        DeepIdV2ContactPathAuthoritySource source, HeldDeepIdV2AccountLease held, CancellationToken ct,
+        ReadOnlyMemory<byte> expectedAuthoredRoot = default)
     {
         ReadOnlyMemory<byte> announcement; byte[] expectedFloor;
         ContactRouteHistoryDmc2Payload control;
@@ -68,6 +69,10 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             _ => throw new CryptographicException("Current route lost its immutable relationship anchor.")
         };
         var peerConsent = subject == 2 ? await QualifyPagedPeerConsentUnderLeaseAsync(read, own, peer, source, held, ct).ConfigureAwait(false) : null;
+        if (!expectedAuthoredRoot.IsEmpty &&
+            (!read.Authored.Roots.TryGetValue(ProtectedDid2DirectTextJournal.Slot, out var authoredRoot) ||
+             authoredRoot is null || !FixedRoute(authoredRoot, expectedAuthoredRoot.Span)))
+            throw new CryptographicException("Announcement maintenance changed its authored root.");
         await opened.WithPairedSqlAsync(peerConsent is null ? read.Authored.PairedRead : PagedPeerConsentPairedRead(read, peerConsent),
             sql => { sql.RequireRouteHistorySnapshot(read.Snapshot, read.Authored.Events); return true; }, ct).ConfigureAwait(false);
         held.RequireOwner(lease); ct.ThrowIfCancellationRequested();

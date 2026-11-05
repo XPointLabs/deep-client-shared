@@ -52,7 +52,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         using var application = await SqliteDeepIdV2AccountGeneration.OpenApplicationUnderLeaseAsync(storage, sqlStatePath, current, held, ct).ConfigureAwait(false);
         var retained = journal.Entries.Values.Where(item => item.Kind == Dmc2ContentKind.ContactRouteUpdate &&
             FixedRoute(item.Scope.Exact, scope.Exact) && !item.Stored && !item.WorkStopped).OrderBy(item => item.Sequence).FirstOrDefault();
-        byte[]? result;
+        byte[]? result; byte[] proactiveRoot = []; OwnNativeRouteHead? proactiveHead = null;
         if (retained is not null)
         {
             // No new operation, payload or publication is substituted for an
@@ -76,13 +76,39 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 if (message.CreatedAtUnixMilliseconds > checked(upper * 1000) ||
                     message.ExpiresAtUnixMilliseconds == 0 || checked(upper * 1000) >= message.ExpiresAtUnixMilliseconds)
                     result = [];
+                else if (upper >= ProactiveRefreshAt(message.CreatedAtUnixMilliseconds / 1000,
+                    message.ExpiresAtUnixMilliseconds / 1000))
+                {
+                    // Scheduling only. The unchanged limiting signed artifact
+                    // cannot be worked around by minting another control.
+                    proactiveRoot = raw.Use(bytes => SHA256.HashData(bytes)); proactiveHead = head;
+                    try
+                    {
+                        var expiry = await ApplicationCoreCodec.ReadVerifiedContactRouteHistoryAnnouncementExpiryAsync(
+                            head.PagedFacts ?? throw new CryptographicException("Announcement lost its verified count8 endpoint."),
+                            publication.Route.Recipient, own.Network, own.Authority, source.RendezvousTrustedTime, ct).ConfigureAwait(false);
+                        await publication.RecheckAsync(ct).ConfigureAwait(false);
+                        if (expiry > message.ExpiresAtUnixMilliseconds) result = [];
+                    }
+                    catch { CryptographicOperations.ZeroMemory(proactiveRoot); throw; }
+                }
             }
         }
         try
         {
             await RequireFinalMessagingFreshnessAsync(current, scope, own, peer, source, held, first, ct).ConfigureAwait(false);
+            if (proactiveHead is not null)
+            {
+                var finalHead = await ReadOwnNativeRouteHeadUnderLeaseAsync(current, held, opened, application,
+                    journal, own, peer, source, ct, proactiveRoot).ConfigureAwait(false);
+                if (!FixedRoute(finalHead.NativeFloor.Span, proactiveHead.NativeFloor.Span) ||
+                    !FixedRoute(finalHead.EventHash.Span, proactiveHead.EventHash.Span) ||
+                    !FixedRoute(finalHead.Announcement.Span, proactiveHead.Announcement.Span))
+                    throw new CryptographicException("Announcement maintenance changed its actual native source.");
+            }
             ct.ThrowIfCancellationRequested(); held.RequireOwner(lease); return result;
         }
         catch { if (result is not null) CryptographicOperations.ZeroMemory(result); throw; }
+        finally { CryptographicOperations.ZeroMemory(proactiveRoot); }
     }
 }

@@ -127,6 +127,14 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             if (entry?.Pending == true) RequireRequestedAuthoredKind(entry.PendingDmc2, payload, routeUpdate, scope);
             if (entry is null)
             {
+                if (historyPreparation == RouteHistoryPreparation.ElectiveAnnouncement)
+                {
+                    if (!routeUpdate || historyCommand != OwnedRouteHistoryCommand.Announcement)
+                        throw new InvalidOperationException("Elective announcement preparation has another owned purpose.");
+                    if (journal.Entries.Values.Any(item => item.Kind == Dmc2ContentKind.ContactRouteUpdate &&
+                        FixedRoute(item.Scope.Exact, scope.Exact) && !item.Stored && !item.WorkStopped))
+                        throw new RouteHistoryWorkNotRequiredException();
+                }
                 // Removing ordinary working custody cannot turn an already
                 // committed native operation into a new logical command.
                 using var committed = await opened.WithSqlAsync(sql => sql.ReadVerifiedOperation(floor, op), ct).ConfigureAwait(false);
@@ -176,6 +184,16 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                         };
                         authoredRouteFloor = (await opened.Custody.ReadCurrentFloorAsync(ct).ConfigureAwait(false)).Exact.ToArray();
                         await publication.RecheckAsync(ct).ConfigureAwait(false);
+                        if (historyPreparation == RouteHistoryPreparation.ElectiveAnnouncement)
+                        {
+                            var expectedRoot = SHA256.HashData(root);
+                            try
+                            {
+                                await RequireElectiveAnnouncementProgressUnderLeaseAsync(current, opened, application, journal,
+                                    publication, authored, expectedRoot, authoredRouteFloor, own, peer, source, held, ct).ConfigureAwait(false);
+                            }
+                            finally { CryptographicOperations.ZeroMemory(expectedRoot); }
+                        }
                     }
                     else
                     {
