@@ -46,6 +46,9 @@ internal sealed class Did2RouteHistorySelection
             throw new ArgumentException("Current route resolution accepts only its endpoint C/P history facts.", nameof(facts));
         return new(false, true, [], facts);
     }
+    // The SQL snapshot derives the two keys only from an actual adopted,
+    // incoming L. This purpose carries no caller-provided endpoint cursor.
+    internal static Did2RouteHistorySelection CurrentPeerEndpoint() => new(false, true, []) { IsCurrentPeerEndpoint = true };
     internal static Did2RouteHistorySelection Custody(ReadOnlySpan<byte> operation)
     {
         if (operation.Length != 32 || Did2MessagingSessionScope.Zero(operation)) throw new ArgumentException("An exact native operation is required.", nameof(operation));
@@ -68,6 +71,7 @@ internal sealed class Did2RouteHistorySelection
     }
     internal bool IsInitial { get; }
     internal bool IsCurrent { get; }
+    internal bool IsCurrentPeerEndpoint { get; private init; }
     internal bool IsCustody { get; }
     internal bool IsPositionConflict { get; }
     internal byte ConflictClass { get; }

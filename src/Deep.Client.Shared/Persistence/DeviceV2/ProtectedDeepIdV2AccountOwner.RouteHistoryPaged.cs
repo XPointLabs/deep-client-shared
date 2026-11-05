@@ -158,17 +158,40 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         held.RequireOwner(lease);
         var stable = await opened.Custody.ReconcileAsync(ct).ConfigureAwait(false);
         Did2RouteHistorySnapshot? snapshot = null;
+        Did2RouteHistorySnapshot? sourceSnapshot = null;
         QualifiedArchiveAuthored? authored = null;
-        var originals = await opened.WithSqlAsync(sql => sql.ReadRouteHistoryAuthoredSources(stable, subject, selection), ct).ConfigureAwait(false);
+        IReadOnlyList<Did2MessagingArchiveOriginal> originals;
+        if (selection.IsCurrentPeerEndpoint)
+        {
+            sourceSnapshot = await opened.WithSqlAsync(sql => sql.CaptureRouteHistorySourceSnapshot(stable, subject, selection), ct).ConfigureAwait(false);
+            originals = sourceSnapshot.Originals.Where(row => row.Reference.Kind == 2 && row.Reference.Direction == 1).ToArray();
+        }
+        else originals = await opened.WithSqlAsync(sql => sql.ReadRouteHistoryAuthoredSources(stable, subject, selection), ct).ConfigureAwait(false);
         try
         {
+#if DEEP_TEST_INTERNALS
+            if (sourceSnapshot is { Facts.Count: 2 })
+                Did2ContactRouteTestHooks.Hit(Did2ContactRouteFailpoint.AfterCurrentPeerEndpointSourceCapture);
+#endif
             authored = await QualifyArchiveAuthoredAsync(opened.Scope, originals, held, ct,
                 maximumOriginals: selection.MaximumAuthoredOriginals).ConfigureAwait(false);
             snapshot = await opened.WithPairedSqlAsync(authored.PairedRead,
                 sql => sql.CaptureRouteHistorySnapshot(stable, subject, selection, authored.Events), ct).ConfigureAwait(false);
+            if (sourceSnapshot is { Facts.Count: 2 } &&
+                (!FixedRoute(sourceSnapshot.Before.Exact.Span, snapshot.Before.Exact.Span) ||
+                 !FixedRoute(sourceSnapshot.L.Exact.Span, snapshot.L.Exact.Span) ||
+                 !sourceSnapshot.L.IsAbsent && !FixedRoute(
+                     SHA256.HashData(sourceSnapshot.FindOriginal(sourceSnapshot.L).Plaintext),
+                     SHA256.HashData(snapshot.FindOriginal(snapshot.L).Plaintext))))
+                throw new CryptographicException("Current peer route changed its exact native endpoint across authored-source qualification.");
             var result = new QualifiedRouteHistoryRead(snapshot, authored); snapshot = null; authored = null; return result;
         }
-        finally { authored?.Dispose(); snapshot?.Dispose(); foreach (var original in originals) original.Dispose(); }
+        finally
+        {
+            authored?.Dispose(); snapshot?.Dispose();
+            if (sourceSnapshot is not null) sourceSnapshot.Dispose();
+            else foreach (var original in originals) original.Dispose();
+        }
     }
 
     private static (ReadOnlyMemory<byte> Invite, ReadOnlyMemory<byte> Route) CompletedSource(

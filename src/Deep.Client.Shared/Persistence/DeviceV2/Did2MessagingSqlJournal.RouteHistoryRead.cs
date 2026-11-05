@@ -105,6 +105,9 @@ internal sealed partial class Did2MessagingSqlJournal
         Did2RouteHistorySelection selection, IReadOnlyDictionary<ulong, ReadOnlyMemory<byte>>? authored = null) =>
         CaptureRouteHistorySnapshotCore(stable, subject, selection, authored, sourcesOnly: false);
 
+    internal Did2RouteHistorySnapshot CaptureRouteHistorySourceSnapshot(Did2MessagingFloor stable, byte subject,
+        Did2RouteHistorySelection selection) => CaptureRouteHistorySnapshotCore(stable, subject, selection, null, sourcesOnly: true);
+
     internal void RequireRouteHistorySnapshot(Did2RouteHistorySnapshot expected,
         IReadOnlyDictionary<ulong, ReadOnlyMemory<byte>>? authored = null)
     {
@@ -177,11 +180,28 @@ internal sealed partial class Did2MessagingSqlJournal
             {
                 AddOriginal(head.Body.C.Reference); AddOriginal(head.Body.P.Reference);
             }
-            foreach (var selector in selection.Facts)
+            var selectors = selection.Facts;
+            if (selection.IsCurrentPeerEndpoint && subject == 2 && head is not null && l.Kind == 2 && l.Direction == 2)
+            {
+                // L remains the latest decision's independently adopted head,
+                // even when newer evidence has advanced C/P beyond that head.
+                var native = AddOriginal(l)!;
+                var message = ApplicationCoreCodec.DecodeDmc2(native.Plaintext);
+                Did2RouteProcessingMetadata.RequireReceivedEvent(native.Metadata.AsSpan(608, 64), message);
+                if (message.ParsedPayload is ContactRouteHistoryDmc2Payload page)
+                {
+                    if (page.Mode is not (DeepIdV2ContactRouteHistoryMode.Announcement or DeepIdV2ContactRouteHistoryMode.EvidenceAndAnnouncement))
+                        throw new CryptographicException("Adopted current peer route lost its original announcement.");
+                    selectors = [
+                        new(Did2MessagingArchiveFamily.RouteHistory, Did2MessagingArchiveRouteFacts.HistorySelector(subject, 1, BinaryPrimitives.ReadUInt64BigEndian(page.RightCursor.Span))),
+                        new(Did2MessagingArchiveFamily.RouteHistory, Did2MessagingArchiveRouteFacts.HistorySelector(subject, 2, BinaryPrimitives.ReadUInt64BigEndian(page.RightCursor.Span[40..])))];
+                }
+            }
+            foreach (var selector in selectors)
             {
                 if ((selection.IsCurrent || selection.IsPositionConflict) && (selector.Family != Did2MessagingArchiveFamily.RouteHistory || selector.Selector.Span[0] != subject))
                     throw new InvalidDataException("Current route read has a foreign completed-history purpose.");
-                if (selection.IsCurrent && !fault.IsAbsent && selection.Facts.Count != 0)
+                if (selection.IsCurrent && !fault.IsAbsent && selectors.Count != 0)
                     throw new CryptographicException("A sticky-faulted current route cannot request historical qualification.");
                 var value = ReadRouteFactAtStable(selector, stable, reducer, headers, authored, initial, tx, sourcesOnly, selection.IsCurrent || selection.IsPositionConflict, selection.MaximumAuthoredOriginals, originals, selection.IsConflict, consent);
                 facts.Add(Did2RouteHistoryFact.Capture(selector, value));
