@@ -48,21 +48,30 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             using var opened = await OpenLocalHistoryUnderLeaseAsync(current, scope, held, ct).ConfigureAwait(false);
             var floor = await opened.Custody.ReconcileAsync(ct).ConfigureAwait(false);
             if (floor.Status != 1) throw new CryptographicException("Latched session grants no group history.");
-            foreach (var chunk in byScope.Chunk(Did2MessagingSqlJournal.MaximumOperationReadBatch))
+            await opened.WithSqlAsync(sql =>
             {
-                ct.ThrowIfCancellationRequested();
-                var nativeRows = await opened.WithSqlAsync(sql => sql.ReadVerifiedOperations(floor, chunk.Select(row => (ReadOnlyMemory<byte>)row.Item.Operation).ToArray()), ct).ConfigureAwait(false);
-                try
+                // One complete native snapshot for this scope; private rows
+                // remain bounded32 and are disposed before the next page.
+                // No provider, callback or await separates these pages.
+                if (!Did2MessagingSessionScope.Fixed(floor.Exact.Span, sql.ReadOpenedFloor().Exact.Span))
+                    throw new CryptographicException("Group history lost its exact reconciled protected floor.");
+                using var history = sql.OpenGroupHistorySnapshot(floor);
+                foreach (var chunk in byScope.Chunk(Did2MessagingSqlJournal.MaximumOperationReadBatch))
                 {
-                    for (var index = 0; index < chunk.Length; index++)
+                    ct.ThrowIfCancellationRequested();
+                    var nativeRows = history.ReadOperations(chunk.Select(row => row.Item.Operation).ToArray());
+                    try
                     {
-                        var native = nativeRows[index] ?? throw new CryptographicException("Group history lost its actual native row.");
-                        // Preserve the protected journal's original cross-scope order.
-                        result[chunk[index].Index] = ReadGroupHistorySnapshot(root.State, scope, chunk[index].Item, native);
+                        for (var index = 0; index < chunk.Length; index++)
+                        {
+                            var native = nativeRows[index] ?? throw new CryptographicException("Group history lost its actual native row.");
+                            // Preserve the protected journal's original cross-scope order.
+                            result[chunk[index].Index] = ReadGroupHistorySnapshot(root.State, scope, chunk[index].Item, native);
+                        }
                     }
+                    finally { foreach (var native in nativeRows) native?.Dispose(); }
                 }
-                finally { foreach (var native in nativeRows) native?.Dispose(); }
-            }
+            }, ct).ConfigureAwait(false);
         }
         held.RequireActive(); ct.ThrowIfCancellationRequested(); return result;
     }

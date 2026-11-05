@@ -317,10 +317,10 @@ internal sealed partial class Did2MessagingSqlJournal(SqliteConnection connectio
         if (protectedStable.Phase != 1 || protectedStable.Status != 1)
             throw new InvalidDataException("Operation read-back requires an active stable messaging floor.");
         using var tx = connection.BeginTransaction(deferred: true);
-        if (activeHistory)
+        if (activeHistory || archiveRoot is not null)
         {
             using var selection = new ActiveSelection([operation.ToArray()]);
-            RequireSame(protectedStable, VerifyActiveTip(tx, selection, out _));
+            RequireSame(protectedStable, VerifyIndexedSelectedTip(tx, selection, out _));
             return ReadCapturedOrdinaryEvent(selection[0], tx);
         }
         RequireSame(protectedStable, VerifyTipInTransaction(tx));
@@ -362,10 +362,10 @@ internal sealed partial class Did2MessagingSqlJournal(SqliteConnection connectio
     {
         ProtectedDph2PreClaimJournal.RequireIntent(eventHash);
         using var tx = connection.BeginTransaction(deferred: true);
-        if (activeHistory)
+        if (activeHistory || archiveRoot is not null)
         {
             using var selection = new ActiveSelection([eventHash.ToArray()], eventHash: true);
-            RequireSame(protectedStable, VerifyActiveTip(tx, selection, out _));
+            RequireSame(protectedStable, VerifyIndexedSelectedTip(tx, selection, out _));
             return ReadCapturedOrdinaryEvent(selection[0], tx);
         }
         RequireSame(protectedStable, VerifyTipInTransaction(tx));
@@ -404,10 +404,10 @@ internal sealed partial class Did2MessagingSqlJournal(SqliteConnection connectio
         // snapshot. No await, callback, mutation or cached verification result
         // can intervene. Later commit/read-back still authenticates actual SQL.
         using var tx = connection.BeginTransaction(deferred: true);
-        if (activeHistory)
+        if (activeHistory || archiveRoot is not null)
         {
             using var selection = new ActiveSelection([operation.ToArray()]);
-            RequireSame(protectedStable, VerifyActiveTip(tx, selection, out var activeHeaders));
+            RequireSame(protectedStable, VerifyIndexedSelectedTip(tx, selection, out var activeHeaders));
             using var captured = ReadCapturedOrdinaryEvent(selection[0], tx);
             var activeReplay = ExactDpe2ReceiveReplayDisposition.Fresh;
             if (captured is not null)
