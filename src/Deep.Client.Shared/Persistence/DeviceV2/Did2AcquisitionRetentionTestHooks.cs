@@ -1,6 +1,6 @@
 #if DEEP_TEST_INTERNALS
 namespace Deep.Client.Shared.Persistence.DeviceV2;
-internal enum Did2AcquisitionRetentionFailpoint { BeforeSeal, AfterSeal, BeforeRestore, AfterRestore, BeforeDelete, AfterDelete }
+internal enum Did2AcquisitionRetentionFailpoint { BeforeSeal, AfterSeal, BeforeRestore, AfterRestore, BeforeDelete, AfterDelete, AfterClosedSourceCapture }
 internal static class Did2AcquisitionRetentionTestHooks
 {
     private static readonly AsyncLocal<Action<Did2AcquisitionRetentionFailpoint>?> Current = new();

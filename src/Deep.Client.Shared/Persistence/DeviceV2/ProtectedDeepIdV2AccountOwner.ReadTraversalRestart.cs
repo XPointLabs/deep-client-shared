@@ -52,6 +52,8 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 ct.ThrowIfCancellationRequested(); held.RequireOwner(lease); return null;
             }
             using var grants = ProtectedDid2MailboxGrantJournal.Decode(grantRoot, networkId, current.AccountId.Span, instance);
+            using var closedSources = await ReadClosedReadAcquisitionsUnderLeaseAsync(current, held, instance,
+                grants, read, grantRoot, snapshot, ct).ConfigureAwait(false);
             var grantScope = Convert.ToHexString(ProtectedDid2MailboxGrantJournal.Scope(route.ExactHash.Span,
                 publication.Locator.Span, (byte)MailboxCapabilityDomain.Retrieve));
             var selected = ProtectedDid2MailboxGrantJournal.CurrentWinner(grants, grantScope) ??
@@ -81,6 +83,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
 #if DEEP_TEST_INTERNALS
             Did2MailboxInstallationTestHooks.Hit(Did2MailboxInstallationFailpoint.BeforeTraversalRestart);
 #endif
+            await RequireClosedReadSourcesAsync(closedSources, grantRoot, snapshot, registrationHash, applicationHash, held, ct).ConfigureAwait(false);
             _ = await application.RestartExpiredContinuationAsync(scope, old, ct).ConfigureAwait(false);
 #if DEEP_TEST_INTERNALS
             Did2MailboxInstallationTestHooks.Hit(Did2MailboxInstallationFailpoint.AfterTraversalRestart);
@@ -102,7 +105,9 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             }
             async Task RequireOriginalOperations()
             {
-                foreach (var entry in grants.Entries.Values)
+                await RequireClosedReadSourcesAsync(closedSources, grantRoot,
+                    nextRoot.Length == 0 ? snapshot : nextRoot, registrationHash, applicationHash, held, ct).ConfigureAwait(false);
+                foreach (var entry in grants.Entries.Values.Concat(closedSources.Entries.Values))
                 {
                     if (!ProtectedDid2MailboxGrantJournal.IsAdoptedWinner(entry) ||
                         !FixedRoute(ProtectedDid2MailboxGrantJournal.OriginalRoute(entry).Span, route.ExactBytes.Span)) continue;
@@ -119,6 +124,8 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                     else if (stored.Result != TransportOutboxReadResult.Missing || stored.Item is not null)
                         throw new CryptographicException("Idle traversal has an unclosed prepared or captured query.");
                 }
+                await RequireClosedReadSourcesAsync(closedSources, grantRoot,
+                    nextRoot.Length == 0 ? snapshot : nextRoot, registrationHash, applicationHash, held, ct).ConfigureAwait(false);
             }
             async Task Guard()
             {
@@ -136,6 +143,8 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                     !roots[1]!.Use(bytes => FixedRoute(SHA256.HashData(bytes), applicationHash)) ||
                     !roots[2]!.Use(bytes => FixedRoute(bytes, grantRoot)) || !roots[3]!.Use(bytes => FixedRoute(bytes, nextRoot.Length == 0 ? snapshot : nextRoot)))
                     throw new CryptographicException("Pagination restart lost its exact account/read/grant custody.");
+                await RequireClosedReadSourcesAsync(closedSources, grantRoot,
+                    nextRoot.Length == 0 ? snapshot : nextRoot, registrationHash, applicationHash, held, ct).ConfigureAwait(false);
                 ct.ThrowIfCancellationRequested(); held.RequireOwner(lease);
             }
         }

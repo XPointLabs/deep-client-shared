@@ -35,7 +35,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             {
                 if (!renewalAcquisition.IsEmpty) throw new InvalidOperationException("A new read cannot take a caller renewal selector.");
                 renewalAcquisition = await SelectNewWorkMailboxGrantRenewalUnderLeaseAsync(current, held, state,
-                    scope, snapshot, source, fresh, ct).ConfigureAwait(false);
+                    scope, snapshot, source, fresh, ct, reuseRetainedReadAtFixedCeiling: renewForNewRead).ConfigureAwait(false);
             }
             var entry = renewalAcquisition.IsEmpty
                 ? ProtectedDid2MailboxGrantJournal.AcquisitionForNewWork(state, scope)

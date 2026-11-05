@@ -33,6 +33,8 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 throw new InvalidDataException("Read recovery lost original grant custody.");
             grantsSnapshot = grantsRaw.Use(bytes => bytes.ToArray());
             using var grants = ProtectedDid2MailboxGrantJournal.Decode(grantsSnapshot, networkId, current.AccountId.Span, instance);
+            using var closedSources = await ReadClosedReadAcquisitionsUnderLeaseAsync(current, held, instance,
+                grants, read, grantsSnapshot, snapshot, ct).ConfigureAwait(false);
             var first = await RecheckRouteFreshnessAsync(current, source, fresh, held, null, ct).ConfigureAwait(false);
             var lower = checked(fresh.Proof.TrustedLowerUnixSeconds + checked(first.SampleSeconds - fresh.Proof.MonotonicSample));
             var active = read.Phase is 1 or 2 ? read.Active : null;
@@ -58,10 +60,11 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             }
             using var application = await SqliteDeepIdV2AccountGeneration.OpenExistingApplicationForOwnerUnderLeaseAsync(
                 storage, sqlStatePath, networkId, current.AccountId, instance, held, lease, ct).ConfigureAwait(false);
+            await RequireClosedReadSourcesAsync(closedSources, grantsSnapshot, snapshot, registrationHash, applicationHash, held, ct).ConfigureAwait(false);
             foreach (var prior in read.Closed.Values)
             {
                 if (lower < prior.ClosedAtLower) throw new CryptographicException("Closed Retrieve crossed protected time rollback.");
-                var entry = OriginalReadAcquisition(grants, prior.Grant);
+                var entry = closedSources.Require(prior);
                 var grant = await RequireOriginalReadFactsUnderLeaseAsync(current, held, source, fresh, host,
                     entry, prior.Grant, prior.Route, prior.Scope, prior.RetrieveBody, ct).ConfigureAwait(false);
                 if (grant.ExpiresAtUnixSeconds != prior.GrantExpiry)
@@ -135,9 +138,11 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
 
             async Task Save()
             {
+                await RequireClosedReadSourcesAsync(closedSources, grantsSnapshot, snapshot, registrationHash, applicationHash, held, ct).ConfigureAwait(false);
                 read.Revision = checked(read.Revision + 1);
                 var next = await SaveMailboxReadJournalAsync(read, snapshot, current, instance, held, ct).ConfigureAwait(false);
                 CryptographicOperations.ZeroMemory(snapshot); snapshot = next;
+                await RequireClosedReadSourcesAsync(closedSources, grantsSnapshot, snapshot, registrationHash, applicationHash, held, ct).ConfigureAwait(false);
             }
             async Task RequireRecoveryGuards()
             {
@@ -157,9 +162,10 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                         throw new CryptographicException("Read closure lost its exact account/application/read/grant custody.");
                 // Provider/CAS callbacks cannot convert or remove the original
                 // outcome between its first read and protected closure.
+                await RequireClosedReadSourcesAsync(closedSources, grantsSnapshot, snapshot, registrationHash, applicationHash, held, ct).ConfigureAwait(false);
                 foreach (var prior in read.Closed.Values)
                 {
-                    var entry = OriginalReadAcquisition(grants, prior.Grant);
+                    var entry = closedSources.Require(prior);
                     var grant = MailboxAuthenticatedCapabilityCodec.DecodeGrant(ContactCodec.Decode("XMC2",
                         ProtectedDid2MailboxGrantJournal.Response(entry).Span).Field(8).Span);
                     var operation = prior.Phase == 3
@@ -176,6 +182,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                         OutboxLogicalId.FromBytes(MailboxAuthenticatedRequestTranscript.DecodeRetrieveBody(cycle.RetrieveBody).OperationId.Span), ct).ConfigureAwait(false);
                     RequireUncapturedReadSql(actual, read.Phase, originalMau, cycle.RetrieveBody, cycle.Grant, cycle.RetrieveCounter, cycle.RetrieveMauHash);
                 }
+                await RequireClosedReadSourcesAsync(closedSources, grantsSnapshot, snapshot, registrationHash, applicationHash, held, ct).ConfigureAwait(false);
                 ct.ThrowIfCancellationRequested(); held.RequireOwner(lease);
             }
         }

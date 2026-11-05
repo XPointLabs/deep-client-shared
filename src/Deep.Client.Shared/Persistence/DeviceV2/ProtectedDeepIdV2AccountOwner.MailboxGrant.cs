@@ -329,12 +329,13 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
 
     // A protected adopted winner is scheduling custody, not current grant authority.
     // Both callers author/verify the successor independently through their actual
-    // current route/host. An active attempt/cycle never calls this selector.
+    // current route/host. Only an ordinary new read opts in to fixed-ceiling
+    // Retrieve reuse; captured final ACK keeps its existing scheduling.
     private async Task<ReadOnlyMemory<byte>> SelectNewWorkMailboxGrantRenewalUnderLeaseAsync(
         VerifiedDeepIdV2CurrentAccount current, HeldDeepIdV2AccountLease held,
         ProtectedDid2MailboxGrantJournal.State state, string scope, byte[] snapshot,
         DeepIdV2ContactPathAuthoritySource source, DeepIdV2ContactPathAuthoritySource.OwnPreKeyAuthoringAuthority fresh,
-        CancellationToken ct)
+        CancellationToken ct, bool reuseRetainedReadAtFixedCeiling = false)
     {
         held.RequireActive(); ct.ThrowIfCancellationRequested();
         var original = ProtectedDid2MailboxGrantJournal.CurrentWinner(state, scope);
@@ -366,6 +367,37 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             due = !IsDepositGrantStructurallyEligibleForCurrentPolicy(grant, fresh.MailboxAuthority) ||
                 IsMailboxGrantRenewalDueForNewWork(grant.NotBeforeUnixSeconds, grant.ExpiresAtUnixSeconds,
                     grant.Domain, upper, fixedCeiling);
+        }
+        else if (reuseRetainedReadAtFixedCeiling && !resume && grant.Domain == MailboxCapabilityDomain.Retrieve)
+        {
+            // Retained issuance can outlive original route admission. Only its
+            // current signed network/PMA ceilings are known here; remote
+            // readUntil and a new start+lifetime must not be guessed.
+            var fixedCeiling = Math.Min(fresh.Network.MaximumRecordExpiryUnixSeconds, fresh.MailboxAuthority.ExpiresAtUnixSeconds);
+            var issuer = fresh.MailboxAuthority.ResolveIssuer(MailboxCapabilityDomain.Retrieve);
+            var originalRoute = ContactRouteClosureCodec.Decode(ProtectedDid2MailboxGrantJournal.OriginalRoute(original).Span);
+            var eligible = grant.Lifecycle == MailboxCapabilityLifecycle.Active &&
+                grant.Generation >= fresh.MailboxAuthority.MinimumGrantGeneration &&
+                grant.ExpiresAtUnixSeconds - grant.NotBeforeUnixSeconds <= fresh.MailboxAuthority.MaximumGrantLifetimeSeconds &&
+                grant.NotBeforeUnixSeconds >= issuer.ValidFromUnixSeconds &&
+                grant.NotBeforeUnixSeconds <= checked(fresh.Proof.TrustedLowerUnixSeconds + elapsed) &&
+                grant.ExpiresAtUnixSeconds <= fixedCeiling &&
+                FixedRoute(grant.NetworkId.Span, fresh.Network.NetworkId.Span) &&
+                FixedRoute(grant.IssuerPublicKey.Span, issuer.PublicKey.Span) &&
+                FixedRoute(grant.MembershipCommitment.Span, originalRoute.Projection.ArtifactHash.Span) &&
+                grant.Epoch == BinaryPrimitives.ReadUInt64BigEndian(originalRoute.Selection.Field(4).Span);
+            if (!eligible) due = true;
+            else if (due && upper < grant.ExpiresAtUnixSeconds && grant.ExpiresAtUnixSeconds == fixedCeiling)
+            {
+                // Structural eligibility is scheduling only. Corrupt signed
+                // bytes, a fork, a clock failure or cancellation must propagate;
+                // none can become permission to issue a different holder.
+                var host = await MailboxHostAuthorityV2Verifier.VerifyPolicyAsync(fresh.Network, fresh.Authority,
+                    fresh.MailboxAuthority, source.RendezvousTrustedTime, ct).ConfigureAwait(false);
+                _ = await host.VerifyRetainedReadSuccessAsync(ProtectedDid2MailboxGrantJournal.OriginalRoute(original),
+                    ProtectedDid2MailboxGrantJournal.Request(original), ProtectedDid2MailboxGrantJournal.Response(original), ct).ConfigureAwait(false);
+                due = false;
+            }
         }
         await RequireExactProtectedMailboxRootAsync(ProtectedDid2MailboxGrantJournal.Slot, snapshot, ct).ConfigureAwait(false);
         ct.ThrowIfCancellationRequested(); held.RequireActive();
