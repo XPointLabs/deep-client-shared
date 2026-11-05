@@ -68,65 +68,72 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                     throw new InvalidDataException("An inactive or latched session grants no local history.");
                 using var application = await SqliteDeepIdV2AccountGeneration.OpenApplicationUnderLeaseAsync(
                     storage, sqlStatePath, current, held, ct).ConfigureAwait(false);
-                var responder = (scope.IsInitiator ? scope.RemoteAccount : scope.LocalAccount).ToArray();
-                var device = (scope.IsInitiator ? scope.RemoteDevice : scope.LocalDevice).ToArray();
-                var retained = await opened.WithSqlAsync(sql => sql.ReadVerifiedActiveInitialEvents(floor), ct).ConfigureAwait(false);
-                byte[]? accepted = null;
-                try
-                {
-                    accepted = await application.ReadContactAcceptAsync(current.AccountId,
-                        BinaryPrimitives.ReadUInt64BigEndian(scope.Exact[84..]), scope.Conversation.ToArray(),
-                        responder, device, ct).ConfigureAwait(false);
-                    if (accepted is not null)
-                    {
-                        if (scope.IsInitiator)
-                        {
-                            using var received = await opened.WithSqlAsync(sql => sql.ReadVerifiedReceiveForEvent(floor, SHA256.HashData(accepted)), ct).ConfigureAwait(false) ??
-                                throw new CryptographicException("Local projection lost actual peer acceptance custody.");
-                            using var plain = received.OwnAuthenticatedDmc2();
-                            if (!plain.Use(bytes => Did2MessagingSessionScope.Fixed(bytes, accepted)))
-                                throw new CryptographicException("Local acceptance projection differs from authenticated receive custody.");
-                        }
-                        else
-                        {
-                            using var marker = await storage.ReadOwnedAsync(ProtectedDid2ContactAcceptJournal.Slot, ct).ConfigureAwait(false) ??
-                                throw new InvalidDataException("Local acceptance lost its protected explicit command.");
-                            using var commands = marker.Use(bytes => ProtectedDid2ContactAcceptJournal.Decode(bytes,
-                                scope.Network, scope.LocalAccount, scope.Instance));
-                            var winner = commands.FindScope(scope) ?? throw new CryptographicException("Local acceptance lost its protected winner.");
-                            using var sent = await opened.WithSqlAsync(sql => sql.ReadVerifiedOperation(floor, winner.Operation), ct).ConfigureAwait(false) ??
-                                throw new CryptographicException("Local acceptance lost actual send custody.");
-                            winner.RequireExactAccept(accepted);
-                            if (sent.Direction != 1 ||
-                                !Did2MessagingSessionScope.Fixed(sent.EventHash, SHA256.HashData(accepted)))
-                                throw new CryptographicException("Local acceptance differs from its exact command/send custody.");
-                        }
-                        var parsed = ApplicationCoreCodec.DecodeDmc2(accepted);
-                        if (parsed.ParsedPayload is not ContactAcceptDmc2Payload payload ||
-                            !Did2MessagingSessionScope.Fixed(parsed.NetworkId.Span, scope.Network) ||
-                            !Did2MessagingSessionScope.Fixed(parsed.ConversationId.Span, scope.Conversation) ||
-                            !Did2MessagingSessionScope.Fixed(parsed.SenderAccountId.Span, responder) ||
-                            !Did2MessagingSessionScope.Fixed(parsed.SenderDeviceId.Span, device) ||
-                            !Did2MessagingSessionScope.Fixed(payload.RelationshipId.Span, scope.Relationship) ||
-                            !Did2MessagingSessionScope.Fixed(payload.ContactHelloHash.Span, SHA256.HashData(retained.Hello)))
-                            throw new CryptographicException("Local acceptance differs from its authenticated conversation.");
-                    }
-                    var state = accepted is null
-                        ? scope.IsInitiator ? DeepIdV2ContactState.OutgoingRequest : DeepIdV2ContactState.IncomingRequest
-                        : scope.IsInitiator ? DeepIdV2ContactState.PeerAcceptanceRetained : DeepIdV2ContactState.LocalAcceptanceRetained;
-                    result.Add(new(new(scope), state));
-                }
-                finally
-                {
-                    foreach (var bytes in new[] { responder, device, retained.SessionInit, retained.Hello })
-                        CryptographicOperations.ZeroMemory(bytes);
-                    if (accepted is not null) CryptographicOperations.ZeroMemory(accepted);
-                }
+                result.Add(await ReadLocalConversationSnapshotUnderLeaseAsync(current, scope, opened, application, floor, ct).ConfigureAwait(false));
             }
             await RequireLocalHistoryCatalogAsync(catalog.Exact, ct).ConfigureAwait(false);
             ct.ThrowIfCancellationRequested(); held.RequireActive(); return result.AsReadOnly();
         }
         finally { CryptographicOperations.ZeroMemory(instance); }
+    }
+
+    private async Task<DeepIdV2ConversationSnapshot> ReadLocalConversationSnapshotUnderLeaseAsync(
+        VerifiedDeepIdV2CurrentAccount current, Did2MessagingSessionScope scope, OwnedDid2MessagingStorage opened,
+        SqliteDeepMailboxStore application, Did2MessagingFloor floor, CancellationToken ct)
+    {
+        var responder = (scope.IsInitiator ? scope.RemoteAccount : scope.LocalAccount).ToArray();
+        var device = (scope.IsInitiator ? scope.RemoteDevice : scope.LocalDevice).ToArray();
+        var retained = await opened.WithSqlAsync(sql => sql.ReadVerifiedActiveInitialEvents(floor), ct).ConfigureAwait(false);
+        byte[]? accepted = null;
+        try
+        {
+            accepted = await application.ReadContactAcceptAsync(current.AccountId,
+                BinaryPrimitives.ReadUInt64BigEndian(scope.Exact[84..]), scope.Conversation.ToArray(),
+                responder, device, ct).ConfigureAwait(false);
+            if (accepted is not null)
+            {
+                if (scope.IsInitiator)
+                {
+                    using var received = await opened.WithSqlAsync(sql => sql.ReadVerifiedReceiveForEvent(floor, SHA256.HashData(accepted)), ct).ConfigureAwait(false) ??
+                        throw new CryptographicException("Local projection lost actual peer acceptance custody.");
+                    using var plain = received.OwnAuthenticatedDmc2();
+                    if (!plain.Use(bytes => Did2MessagingSessionScope.Fixed(bytes, accepted)))
+                        throw new CryptographicException("Local acceptance projection differs from authenticated receive custody.");
+                }
+                else
+                {
+                    using var marker = await storage.ReadOwnedAsync(ProtectedDid2ContactAcceptJournal.Slot, ct).ConfigureAwait(false) ??
+                        throw new InvalidDataException("Local acceptance lost its protected explicit command.");
+                    using var commands = marker.Use(bytes => ProtectedDid2ContactAcceptJournal.Decode(bytes,
+                        scope.Network, scope.LocalAccount, scope.Instance));
+                    var winner = commands.FindScope(scope) ?? throw new CryptographicException("Local acceptance lost its protected winner.");
+                    using var sent = await opened.WithSqlAsync(sql => sql.ReadVerifiedOperation(floor, winner.Operation), ct).ConfigureAwait(false) ??
+                        throw new CryptographicException("Local acceptance lost actual send custody.");
+                    winner.RequireExactAccept(accepted);
+                    if (sent.Direction != 1 ||
+                        !Did2MessagingSessionScope.Fixed(sent.EventHash, SHA256.HashData(accepted)))
+                        throw new CryptographicException("Local acceptance differs from its exact command/send custody.");
+                }
+                var parsed = ApplicationCoreCodec.DecodeDmc2(accepted);
+                if (parsed.ParsedPayload is not ContactAcceptDmc2Payload payload ||
+                    !Did2MessagingSessionScope.Fixed(parsed.NetworkId.Span, scope.Network) ||
+                    !Did2MessagingSessionScope.Fixed(parsed.ConversationId.Span, scope.Conversation) ||
+                    !Did2MessagingSessionScope.Fixed(parsed.SenderAccountId.Span, responder) ||
+                    !Did2MessagingSessionScope.Fixed(parsed.SenderDeviceId.Span, device) ||
+                    !Did2MessagingSessionScope.Fixed(payload.RelationshipId.Span, scope.Relationship) ||
+                    !Did2MessagingSessionScope.Fixed(payload.ContactHelloHash.Span, SHA256.HashData(retained.Hello)))
+                    throw new CryptographicException("Local acceptance differs from its authenticated conversation.");
+            }
+            var state = accepted is null
+                ? scope.IsInitiator ? DeepIdV2ContactState.OutgoingRequest : DeepIdV2ContactState.IncomingRequest
+                : scope.IsInitiator ? DeepIdV2ContactState.PeerAcceptanceRetained : DeepIdV2ContactState.LocalAcceptanceRetained;
+            return new(new(scope), state);
+        }
+        finally
+        {
+            foreach (var bytes in new[] { responder, device, retained.SessionInit, retained.Hello })
+                CryptographicOperations.ZeroMemory(bytes);
+            if (accepted is not null) CryptographicOperations.ZeroMemory(accepted);
+        }
     }
 
     private async Task RequireLocalHistoryCatalogAsync(ReadOnlyMemory<byte> exact, CancellationToken ct)

@@ -336,6 +336,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         { Directory.CreateDirectory(directory); path = Path.Combine(directory, "compaction-fixture.protected.bin"); store = JournaledDeepSecureStorage.CreateNewAsync(path, new CompactionFixtureProtector(key)).GetAwaiter().GetResult(); }
         private JournaledDeepSecureStorage Open() => new(path, new CompactionFixtureProtector(key));
         internal void Reopen() { store.Dispose(); store = Open(); }
+        internal DeepSecureStorageWorkSnapshot ReadWorkSnapshot() => store.ReadWorkSnapshot();
         public Task<OwnedDeepSecret?> ReadOwnedAsync(string slot, CancellationToken ct = default) => store.ReadOwnedAsync(slot, ct);
         public Task WriteBatchAsync(IReadOnlyList<DeepSecureStorageWrite> writes, CancellationToken ct = default) => store.WriteBatchAsync(writes, ct);
         public Task<bool> CompareExchangeAsync(string slot, ReadOnlyMemory<byte> expected, ReadOnlyMemory<byte> replacement, CancellationToken ct = default) => store.CompareExchangeAsync(slot, expected, replacement, ct);

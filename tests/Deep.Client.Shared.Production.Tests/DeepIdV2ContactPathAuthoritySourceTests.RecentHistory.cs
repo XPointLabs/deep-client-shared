@@ -32,7 +32,11 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             Assert.Equal(full.TakeLast(2).Reverse(), await account.ListRecentMessagesAsync(conversation, 2));
             Assert.Equal(full.TakeLast(1), await account.ListRecentMessagesAsync(conversation, 1));
             Assert.Equal(full.Reverse(), await account.ListRecentMessagesAsync(conversation, 100));
+            Assert.Equal(full.TakeLast(2).Reverse(), await account.ListRecentMessagesAsync(conversation.ConversationId, 2));
+            Assert.Equal(full.TakeLast(1), await account.ListRecentMessagesAsync(conversation.ConversationId, 1));
+            Assert.Equal(full.Reverse(), await account.ListRecentMessagesAsync(conversation.ConversationId, 100));
             Assert.Equal(requests, fixture.ProofRequests);
         }
+        await fixture.VerifySelectedRecentConsentTampering(sender, receiver);
     }
 }

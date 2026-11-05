@@ -215,4 +215,21 @@ public sealed partial class DeepIdV2AccountService
         return messages.Reverse().ToArray();
     }
 
+    /// <summary>Reads recent authenticated ordinary history by its exact owned conversation identifier in one account operation.</summary>
+    /// <param name="conversationId">The canonical uppercase hexadecimal conversation identifier.</param>
+    /// <param name="maximumItems">A page size from 1 through 100.</param>
+    /// <param name="ct">Cancellation for the local protected read.</param>
+    /// <returns>Newest-first messages from the single authenticated selected scope. An absent conversation fails closed.</returns>
+    public async Task<IReadOnlyList<DirectMessageCreateSnapshot>> ListRecentMessagesAsync(string conversationId,
+        int maximumItems = 20, CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(conversationId);
+        if (conversationId.Length != 64 || conversationId.Any(value => value is not (>= '0' and <= '9') and not (>= 'A' and <= 'F')))
+            throw new ArgumentException("A canonical conversation identifier is required.", nameof(conversationId));
+        if (maximumItems is < 1 or > 100) throw new ArgumentOutOfRangeException(nameof(maximumItems));
+        using var verifier = OpenVerifier();
+        var messages = await owner.ReadLocalRecentMessagesAsync(TrustedUnixSeconds(), verifier, conversationId, maximumItems, ct).ConfigureAwait(false);
+        return messages.Reverse().ToArray();
+    }
+
 }
