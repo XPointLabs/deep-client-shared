@@ -11,7 +11,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
 {
     private sealed record PagedRouteHistoryEndpoint(ParsedDeepIdV2ContactMailboxRoute Original,
         VerifiedDeepIdV2ContactRouteHistory Facts, ReadOnlyMemory<byte> Announcement,
-        ReadOnlyMemory<byte> EventHash, ReadOnlyMemory<byte> NativeFloor);
+        ReadOnlyMemory<byte> EventHash, ReadOnlyMemory<byte> NativeFloor, PagedPeerConsentFacts? PeerConsent = null);
 
     // Bootstrap can retain an already qualified legacy L. Its existing
     // predecessor verifier remains responsible for that payload, while this
@@ -67,9 +67,10 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             ContactAcceptDmc2Payload accept => accept.MailboxRoute,
             _ => throw new CryptographicException("Current route lost its immutable relationship anchor.")
         };
-        await opened.WithPairedSqlAsync(read.Authored.PairedRead,
+        var peerConsent = subject == 2 ? await QualifyPagedPeerConsentUnderLeaseAsync(read, own, peer, source, held, ct).ConfigureAwait(false) : null;
+        await opened.WithPairedSqlAsync(peerConsent is null ? read.Authored.PairedRead : PagedPeerConsentPairedRead(read, peerConsent),
             sql => { sql.RequireRouteHistorySnapshot(read.Snapshot, read.Authored.Events); return true; }, ct).ConfigureAwait(false);
         held.RequireOwner(lease); ct.ThrowIfCancellationRequested();
-        return new(original, facts, announcement, SHA256.HashData(announcement.Span), read.Snapshot.Before.Exact.ToArray());
+        return new(original, facts, announcement, SHA256.HashData(announcement.Span), read.Snapshot.Before.Exact.ToArray(), peerConsent);
     }
 }

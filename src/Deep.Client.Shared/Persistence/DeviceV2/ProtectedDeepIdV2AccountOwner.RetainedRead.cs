@@ -48,6 +48,16 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                     throw new CryptographicException("New-read custody changed before grant acquisition.");
                 if (renewForNewRead) ProtectedDid2MailboxReadJournal.RequireRoomForNewCycle(expectedNewReadRoot.Length);
                 using var read = readRoot.Use(bytes => ProtectedDid2MailboxReadJournal.Decode(bytes, networkId, current.AccountId.Span, instance));
+                if (renewForNewRead && ProtectedDid2MailboxGrantJournal.CurrentWinner(state, scope) is { } original &&
+                    read.Closed.ContainsKey(Convert.ToHexString(SHA256.HashData(ContactCodec.Decode("XMC2",
+                        ProtectedDid2MailboxGrantJournal.Response(original).Span).Field(8).Span))))
+                {
+                    // Closure retains uncertainty for this exact holder. A new
+                    // traversal uses normal independent-holder issuance, even
+                    // when the old grant's own expiry is still in the future.
+                    renewalAcquisition = SHA256.HashData(ProtectedDid2MailboxGrantJournal.Request(original).Span);
+                    entry = ProtectedDid2MailboxGrantJournal.AcquisitionForRenewal(state, scope, renewalAcquisition.Span);
+                }
                 if (renewForCapturedFinalAck)
                 {
                     if (read.Phase < 4 || read.Active is null || read.Active.ReadPage().HasMore ||

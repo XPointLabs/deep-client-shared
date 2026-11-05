@@ -51,6 +51,35 @@ public sealed partial class SqliteSessionStore :
             expectedTraversal,
             cancellationToken);
 
+    // Only the held DID2 owner can supply the authenticated idle QA predecessor
+    // after independently proving continuation expiry. No outcome is changed.
+    internal async Task<ClientMailboxTraversal> RestartExpiredContinuationAsync(
+        ClientMailboxScope scope, ClientMailboxTraversal expected, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(scope); ArgumentNullException.ThrowIfNull(expected);
+        if (expected.AfterCursor == 0 || expected.ContinuationToken.IsEmpty)
+            throw new InvalidOperationException("Traversal restart requires its exact nonempty predecessor.");
+        var next = new ClientMailboxTraversal(0, [], checked(expected.PollGeneration + 1));
+        await _databaseGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
+            await using var transaction = connection.BeginTransaction(deferred: false);
+            var actual = await ReadTraversalCoreAsync(connection, transaction, scope.ToArray(), cancellationToken).ConfigureAwait(false);
+            static bool Same(ClientMailboxTraversal left, ClientMailboxTraversal right) =>
+                left.PollGeneration == right.PollGeneration && left.AfterCursor == right.AfterCursor &&
+                left.ContinuationToken.SequenceEqual(right.ContinuationToken);
+            if (Same(actual, next)) return actual; // Exact commit-result loss only.
+            if (!Same(actual, expected)) throw new CryptographicException("Traversal restart lost its protected predecessor.");
+            await WriteTraversalAsync(connection, transaction, scope.ToArray(), next, cancellationToken).ConfigureAwait(false);
+            commitFault?.Invoke(ClientMailboxCommitFaultPoint.BeforeCommit);
+            await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+            commitFault?.Invoke(ClientMailboxCommitFaultPoint.AfterCommit);
+            return next;
+        }
+        finally { _databaseGate.Release(); }
+    }
+
     async Task<ClientMailboxTraversal>
         ITerminalRetrieveRetirementRepository.RetireTerminallyRejectedRetrieveAsync(
         ClientMailboxScope scope,

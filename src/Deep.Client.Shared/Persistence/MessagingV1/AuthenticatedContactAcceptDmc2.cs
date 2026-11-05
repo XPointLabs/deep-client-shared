@@ -15,6 +15,16 @@ internal sealed class AuthenticatedContactAcceptDmc2 : IAuthenticatedDmc2InboxEv
     private int disposed;
     private AuthenticatedContactAcceptDmc2(ReadOnlySpan<byte> exact, Did2MessagingSessionScope scope)
     {
+        var parsed = RequireOwnedDid2SemanticScope(exact, scope);
+        this.exact = exact.ToArray(); local = scope.LocalAccount.ToArray(); conversation = parsed.ConversationId.ToArray();
+        logical = parsed.LogicalMessageId.ToArray(); author = parsed.SenderAccountId.ToArray(); device = parsed.SenderDeviceId.ToArray();
+        LocalAccountGeneration = BinaryPrimitives.ReadUInt64BigEndian(scope.Exact[84..]);
+    }
+
+    // Parsed facts only, not an authenticated inbox/ACK capability. The
+    // caller must still join actual native, application and explicit custody.
+    internal static ParsedDmc2 RequireOwnedDid2SemanticScope(ReadOnlySpan<byte> exact, Did2MessagingSessionScope scope)
+    {
         var parsed = ApplicationCoreCodec.DecodeDmc2(exact);
         try
         {
@@ -24,9 +34,7 @@ internal sealed class AuthenticatedContactAcceptDmc2 : IAuthenticatedDmc2InboxEv
                 !Fixed(parsed.SenderAccountId.Span, scope.IsInitiator ? scope.RemoteAccount : scope.LocalAccount) ||
                 !Fixed(parsed.SenderDeviceId.Span, scope.IsInitiator ? scope.RemoteDevice : scope.LocalDevice))
                 throw new CryptographicException("ContactAccept is outside its authenticated responder position.");
-            this.exact = exact.ToArray(); local = scope.LocalAccount.ToArray(); conversation = parsed.ConversationId.ToArray();
-            logical = parsed.LogicalMessageId.ToArray(); author = parsed.SenderAccountId.ToArray(); device = parsed.SenderDeviceId.ToArray();
-            LocalAccountGeneration = BinaryPrimitives.ReadUInt64BigEndian(scope.Exact[84..]);
+            return parsed;
         }
         finally { if (parsed.ParsedPayload is AttachmentOfferDmc2Payload offer) offer.Manifest.Dispose(); }
     }

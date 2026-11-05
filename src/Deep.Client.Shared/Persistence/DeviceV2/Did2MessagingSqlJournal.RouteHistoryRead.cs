@@ -110,7 +110,10 @@ internal sealed partial class Did2MessagingSqlJournal
     {
         RequireScope(expected.Scope);
         using var actual = CaptureRouteHistorySnapshot(expected.Before, expected.Subject, expected.Selection, authored);
-        if (!Fixed(expected.Transcript, actual.Transcript)) throw new CryptographicException("Selected route-history native source snapshot changed after qualification.");
+        if (!Fixed(expected.Transcript, actual.Transcript) ||
+            !Fixed(expected.InitialSessionInit.Span, actual.InitialSessionInit.Span) ||
+            !Fixed(expected.InitialHello.Span, actual.InitialHello.Span))
+            throw new CryptographicException("Selected route-history native source snapshot changed after qualification.");
     }
 
     private Did2RouteHistorySnapshot CaptureRouteHistorySnapshotCore(Did2MessagingFloor stable, byte subject,

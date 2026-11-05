@@ -670,7 +670,7 @@ public sealed class ClientMailboxAdapter
             route.PlacementId,
             traversal);
 
-    private static byte[] RetrieveOperationId(
+    internal static byte[] RetrieveOperationId(
         ulong epoch,
         BlindedMailboxId mailboxId,
         BlindedPlacementId placementId,

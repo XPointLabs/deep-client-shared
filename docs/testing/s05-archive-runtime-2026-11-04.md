@@ -348,3 +348,41 @@ All11 selected identities have passing evidence across these receipts; the eight
 already passed cases were not repeated solely for the fixes. This is focused
 source evidence. Matching retained target execution, warm delivery/ACK timing and
 the canonical full Shared gate remain pending; no full or target pass is claimed.
+
+## Count8 consent reuse and expired read recovery
+
+The [DR0178](../../../docs/survival-program/decisions/DR-0178-paged-route-history-and-current-promotion.md)
+count8 reader reuses actual bounded native consent facts while preserving final
+and deferred native/floor/archive, protected winner and canonical application
+projection joins, endpoint freshness and physical integrity checks. Both roles
+are checked with test-only path counters; no measured speedup is claimed.
+The [DR0133](../../../docs/survival-program/decisions/DR-0133-expired-owned-retrieve-attempt-closure.md)
+read-recovery cases exercise exact expired-request custody, independent holders,
+trusted lower-time closure and pagination restart without changing inbox/ACK
+ownership. Existing malformed, overlap and callback refusals remain enforced.
+
+- Build47, build48 and build49 passed with native exit0 and2198 unchanged source
+  inputs each; these build-only receipts do not qualify runtime or full behavior.
+- Qualification27 hit its20-minute watchdog without a TRX or native/final test
+  receipt and remains unqualified. All2340 captured Path/Sha256 rows compared equal
+  afterward. Its projection/fork callbacks had reacquired the account lease held
+  by the tested owner. They now capture the same full application digest on the
+  existing mutation connection; rejection/no-repair assertions are unchanged.
+- Qualification28 recorded7 passed /1 failed /0 skipped, native exit1 and2340
+  unchanged inputs. Its winner fixture removed the sole entry with a noncanonical
+  empty revision and failed before CAS. The correction round-trips a canonical
+  missing-winner journal before actual CAS, preserving strict rejection checks.
+- Qualification29 recorded10 passed /0 failed /0 skipped, native exit0 and2340
+  unchanged inputs, but its wrapper exited1 and `focusedAccepted` remains false:
+  the declared count was8. `DisplayName~winner` also matched the method name's
+  `Winner`, selecting all three projection/fork/winner rows plus seven new read
+  cases. The original declaration/count failure is preserved, not relabeled as
+  an accepted gate; no rerun was performed solely to change its count.
+
+Across q28/q29 all15 distinct new identities have actual passing test evidence.
+Receipts remain under `artifacts/archive-resume-20261104-build47`, `-build48`,
+`-build49`, `-qualification27`, `-qualification28` and `-qualification29`.
+Historical failures are retained without waiver. Previously covered transitive
+cases remain mandatory in the canonical full gate. Retained target diagnostics,
+warm delivery/ACK measurements and full Shared qualification remain pending;
+this packet claims no target, warm, full or release qualification.

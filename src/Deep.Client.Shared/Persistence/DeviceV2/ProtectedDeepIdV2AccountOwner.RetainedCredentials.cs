@@ -77,7 +77,11 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             }
 #endif
             localPolicy.ValidateFreshness(); held.RequireActive(); ct.ThrowIfCancellationRequested();
-            return new(application, holder, localPolicy, authority, selector, read, grant);
+            var loan = new MailboxCredentialLoan(application, holder, localPolicy, authority, selector, read, grant);
+#if DEEP_TEST_INTERNALS
+            await Did2MailboxInstallationTestHooks.CheckReadPreparationAsync(application, selector, read, loan.Signer, authority, ct).ConfigureAwait(false);
+#endif
+            return loan;
         }
         catch { application?.Dispose(); holder?.Dispose(); localPolicy.Dispose(); throw; }
     }

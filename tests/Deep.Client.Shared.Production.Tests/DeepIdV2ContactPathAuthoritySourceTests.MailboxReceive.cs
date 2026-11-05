@@ -1,3 +1,4 @@
+using System.Buffers.Binary;
 using System.Security.Cryptography;
 using Deep.Client.Shared.Persistence;
 using Deep.Client.Shared.Persistence.DeviceV2;
@@ -482,6 +483,8 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         internal List<byte[]> ExactAckRequests { get; } = [];
         internal bool IndependentAck;
         internal bool HasMoreAfterPage;
+        internal bool CanonicalContinuation;
+        internal byte[] IssuedContinuation = [];
         public IClientMailboxBinaryIngress Create(Did2OwnedMailboxTransportContext loan, IMailboxClientDecodePolicyProvider decoder)
         { context = loan; policy = decoder; return this; }
         private async Task BuildHeldFrame(OnionOperation operation, ReadOnlyMemory<byte> exact, ScopedMailboxResolvedRoute route, CancellationToken ct)
@@ -521,10 +524,32 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                 CreatedAtUnixSeconds = decode.NowUnixSeconds,
                 ExpiresAtUnixSeconds = Math.Min(decode.EpochWindow.CurrentExpiresAtUnixSeconds, decode.NowUnixSeconds + MailboxClientLimits.MaximumTtlSeconds)
             };
+            if (CanonicalContinuation && HasMoreAfterPage && !tombstoned)
+            {
+                var token = new byte[232]; "XCT1"u8.CopyTo(token); token[4] = 1; token[5] = 3;
+                BinaryPrimitives.WriteUInt16BigEndian(token.AsSpan(6), request.MaximumItems);
+                BinaryPrimitives.WriteUInt64BigEndian(token.AsSpan(8), request.Epoch);
+                BinaryPrimitives.WriteUInt64BigEndian(token.AsSpan(16), Cursor);
+                BinaryPrimitives.WriteUInt64BigEndian(token.AsSpan(24), Math.Min(mau.Presentation.Grant.ExpiresAtUnixSeconds, checked(decode.NowUnixSeconds + 60)));
+                BinaryPrimitives.WriteUInt64BigEndian(token.AsSpan(32), checked(Cursor + 1));
+                request.MailboxId.Bytes.Span.CopyTo(token.AsSpan(40)); route.PlacementCommitment.Span.CopyTo(token.AsSpan(72));
+                route.MembershipCommitment.Span.CopyTo(token.AsSpan(104));
+                var digestInput = new byte[40]; BinaryPrimitives.WriteUInt64BigEndian(digestInput, Cursor);
+                envelope.DeduplicationDigest.Span.CopyTo(digestInput.AsSpan(8)); SHA256.HashData(digestInput).CopyTo(token, 136);
+                var marker = (byte)Enumerable.Range(0x70, 3).Single(value => PublicKey((byte)value).AsSpan().SequenceEqual(route.Replicas.FirstId.Span));
+                var key = Sodium.PublicKeyAuth.GenerateKeyPair(Bytes(32, marker)).PrivateKey;
+                try
+                {
+                    Sodium.PublicKeyAuth.SignDetached(token.AsSpan(0, 168).ToArray(), key).CopyTo(token, 168);
+                    Assert.True(Sodium.PublicKeyAuth.VerifyDetached(token.AsSpan(168).ToArray(), token.AsSpan(0, 168).ToArray(), route.Replicas.FirstSigningKey.ToArray()));
+                }
+                finally { CryptographicOperations.ZeroMemory(key); }
+                IssuedContinuation = token;
+            }
             return MailboxClientCodec.EncodeRetrievePage(new()
             {
                 Epoch = request.Epoch, OperationId = request.OperationId, NextCursor = tombstoned ? 0UL : Cursor, HasMore = HasMoreAfterPage && !tombstoned,
-                ContinuationToken = HasMoreAfterPage && !tombstoned ? Bytes(32, 0xb4) : ReadOnlyMemory<byte>.Empty,
+                ContinuationToken = HasMoreAfterPage && !tombstoned ? (CanonicalContinuation ? IssuedContinuation : Bytes(32, 0xb4)) : ReadOnlyMemory<byte>.Empty,
                 Items = tombstoned ? [] : [new() { Cursor = Cursor, Envelope = envelope }]
             });
         }
@@ -542,7 +567,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             await BuildHeldFrame(OnionOperation.Acknowledge, exact, route, ct); BuiltAckFrame = true;
             Assert.Equal(Cursor, Assert.Single(request.Acknowledgements).Cursor);
             Assert.Equal(!HasMoreAfterPage, request.IsFinalPage);
-            Assert.Equal(HasMoreAfterPage ? Bytes(32, 0xb4) : [], request.ContinuationToken.ToArray());
+            Assert.Equal(HasMoreAfterPage ? (CanonicalContinuation ? IssuedContinuation : Bytes(32, 0xb4)) : [], request.ContinuationToken.ToArray());
             Assert.Equal(envelope!.DeduplicationDigest.ToArray(), request.Acknowledgements[0].EnvelopeDigest.ToArray());
             if (!ackResponses.TryGetValue(operation, out var ackResponse))
             {

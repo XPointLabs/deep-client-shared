@@ -1,3 +1,4 @@
+using System.Buffers.Binary;
 using System.Security.Cryptography;
 using Deep.Protocol.DeepExtension.MailboxCapabilities;
 using Sodium;
@@ -16,6 +17,32 @@ internal static partial class ProtectedDid2MailboxReadJournal
         if (idleRootBytes < HeaderBytes || idleRootBytes > MaximumBytes - MaximumNewCycleGrowthBytes)
             throw new IOException("Protected mailbox read capacity cannot fit a complete new cycle; retained attempts cannot be evicted.");
     }
+
+    // Denial only. The exact protected body/MAU and actual grant still need
+    // their owner joins; this does not authenticate a token or authorize I/O.
+    internal static ulong? BoundContinuationExpiry(ReadOnlySpan<byte> body, MailboxAuthenticatedGrant grant)
+    {
+        var request = MailboxAuthenticatedRequestTranscript.DecodeRetrieveBody(body);
+        if (request.AfterCursor == 0 && request.ContinuationToken.IsEmpty) return null;
+        var token = request.ContinuationToken.Span;
+        if (token.Length != 232 || !token[..4].SequenceEqual("XCT1"u8) || token[4] != 1 || token[5] != 3 ||
+            BinaryPrimitives.ReadUInt16BigEndian(token[6..]) is 0 or > MailboxClientLimits.MaximumPageItems ||
+            BinaryPrimitives.ReadUInt16BigEndian(token[6..]) < request.MaximumItems ||
+            request.AfterCursor == 0 || BinaryPrimitives.ReadUInt64BigEndian(token[16..]) != request.AfterCursor ||
+            BinaryPrimitives.ReadUInt64BigEndian(token[32..]) < request.AfterCursor ||
+            request.Epoch != grant.Epoch || BinaryPrimitives.ReadUInt64BigEndian(token[8..]) != request.Epoch ||
+            !Fixed(token.Slice(40, 32), request.MailboxId.Bytes.Span) ||
+            !Fixed(token.Slice(72, 32), grant.PlacementCommitment.Span) ||
+            !Fixed(grant.PlacementCommitment.Span, MailboxPlacementCommitment.Compute(request.PlacementId)) ||
+            !Fixed(token.Slice(104, 32), grant.MembershipCommitment.Span))
+            throw new CryptographicException("Expired continuation lost its exact original request/grant context.");
+        var expiry = BinaryPrimitives.ReadUInt64BigEndian(token[24..]);
+        if (expiry == 0) throw Bad();
+        return expiry;
+    }
+
+    internal static bool IsDisjointExpiredContinuation(ReadOnlySpan<byte> body, MailboxAuthenticatedGrant grant, ulong lower) =>
+        BoundContinuationExpiry(body, grant) is { } expiry && expiry <= grant.NotBeforeUnixSeconds && lower >= expiry;
 
     // Local facts only; actual original SQL, holder and current lower-time
     // closure must be independently joined by the held account owner.
@@ -61,7 +88,7 @@ internal static partial class ProtectedDid2MailboxReadJournal
         internal void RequireShape()
         {
             Require32(Grant); Require32(Scope); Require32(Route);
-            if (Phase is not (1 or 2 or 3) || GrantExpiry == 0 || ClosedAtLower < GrantExpiry ||
+            if (Phase is not (1 or 2 or 3) || GrantExpiry == 0 || Phase != 2 && ClosedAtLower < GrantExpiry ||
                 RetrieveBody.Length is < 108 or > 364 || MauHash.Length != 32 || ExactMau.Length > 8_192 ||
                 (Phase == 1 ? Counter != 0 || !Zero(MauHash) || ExactMau.Length != 0 : Counter == 0 || Zero(MauHash) || ExactMau.Length == 0)) throw Bad();
             _ = MailboxAuthenticatedRequestTranscript.DecodeRetrieveBody(RetrieveBody);
@@ -76,6 +103,8 @@ internal static partial class ProtectedDid2MailboxReadJournal
                 !PublicKeyAuth.VerifyDetached(mau.Presentation.HolderSignature.ToArray(),
                     MailboxAuthenticatedCapabilityCodec.GetPresentationSigningBytes(mau.Presentation), mau.Presentation.Grant.HolderPublicKey.ToArray()))
                 throw new CryptographicException("Closed Retrieve differs from its exact original signed frame.");
+            if (Phase == 2 && ClosedAtLower < GrantExpiry &&
+                !IsDisjointExpiredContinuation(RetrieveBody, mau.Presentation.Grant, ClosedAtLower)) throw Bad();
             if (Phase == 3)
             {
                 var read = MailboxAuthenticatedRequestTranscript.DecodeRetrieveBody(RetrieveBody);

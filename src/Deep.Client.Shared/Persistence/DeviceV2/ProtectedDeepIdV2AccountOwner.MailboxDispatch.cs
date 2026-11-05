@@ -105,15 +105,18 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         }
         // The class comes from authenticated native history, never a transport
         // flag. Ordinary semantic readers remain data-only.
-        if (await opened.WithSqlAsync(sql => sql.ReadVerifiedNativeEventDirection(floor, operation.Span), ct).ConfigureAwait(false) == 3)
+        return await opened.WithSqlAsync(sql =>
         {
-            using var control = await opened.WithSqlAsync(sql => sql.ReadVerifiedBraidControl(floor, operation.Span), ct).ConfigureAwait(false) ??
-                throw new CryptographicException("Control Store lost its actual committed send.");
-            return control.ExactControl.ToArray();
-        }
-        using var sent = await opened.WithSqlAsync(sql => sql.ReadVerifiedOperation(floor, operation.Span), ct).ConfigureAwait(false) ?? throw new CryptographicException("Only an actual committed owned message can be dispatched.");
-        if (sent.Direction != 1) throw new CryptographicException("A receive row cannot authorize mailbox Store.");
-        return sent.ExactEnvelope.ToArray();
+            if (sql.ReadVerifiedNativeEventDirection(floor, operation.Span) == 3)
+            {
+                using var control = sql.ReadVerifiedBraidControl(floor, operation.Span) ??
+                    throw new CryptographicException("Control Store lost its actual committed send.");
+                return control.ExactControl.ToArray();
+            }
+            using var sent = sql.ReadVerifiedOperation(floor, operation.Span) ?? throw new CryptographicException("Only an actual committed owned message can be dispatched.");
+            if (sent.Direction != 1) throw new CryptographicException("A receive row cannot authorize mailbox Store.");
+            return sent.ExactEnvelope.ToArray();
+        }, ct).ConfigureAwait(false);
     }
 
     private async Task<ClientMailboxStoreResult> DeliverOwnedMailboxAsync(ulong unixSeconds,
@@ -666,6 +669,15 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         DeepIdV2ContactPathAuthoritySource source, HeldDeepIdV2AccountLease held, CancellationToken ct)
     {
         held.RequireActive(); var scope = opened.Scope;
+        var paged = await ReadPagedLiveRouteHistoryUnderLeaseAsync(opened, 2, own, peer, source, held, ct).ConfigureAwait(false);
+        if (paged is not null)
+        {
+            var consent = paged.PeerConsent ?? throw new CryptographicException("Paged peer route lost its independently qualified consent facts.");
+            return new(paged.Original, ContactRouteClosureCodec.Decode(paged.Facts.ExactCompletedRoute.Span), paged.EventHash,
+                paged.NativeFloor, ReadOnlyMemory<byte>.Empty, ReadOnlyMemory<byte>.Empty, paged.Announcement, false,
+                (ordinal, token) => RecheckPagedPeerConsentUnderLeaseAsync(opened, consent, ordinal, own, peer, source, held, token),
+                consent.InboundXur1, paged.Facts);
+        }
         using var pending = await AuthenticatedInitialDmc2Batch.FromOwnedDid2Async(opened, own, peer, source, held, ct).ConfigureAwait(false);
         var hello = pending.FirstApplicationDmc2; byte[]? accepted = null;
         try

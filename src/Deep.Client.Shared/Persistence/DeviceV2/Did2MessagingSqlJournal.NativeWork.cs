@@ -9,6 +9,9 @@ internal sealed partial class Did2MessagingSqlJournal
         internal sealed class Counts : IDisposable
         {
             internal long Opens, CipherScans, MetadataRows, SuffixRows, Payloads, Audits, MaintenanceBatches;
+#if DEEP_TEST_INTERNALS
+            internal long InitialHandoffs, PagedPeerConsentReads;
+#endif
             internal ulong WorkingCount, ArchiveCount;
             internal readonly double[] Timings = new double[8];
             public void Dispose() { if (ReferenceEquals(Current.Value, this)) Current.Value = null; }
@@ -16,6 +19,10 @@ internal sealed partial class Did2MessagingSqlJournal
         internal static Counts Measure() { var result = new Counts(); Current.Value = result; return result; }
         internal static Counts? BeginOperation() => Current.Value is null ? Measure() : null;
         internal static void Open() { if (Current.Value is { } value) value.Opens++; }
+#if DEEP_TEST_INTERNALS
+        internal static void InitialHandoff() { if (Current.Value is { } value) value.InitialHandoffs++; }
+        internal static void PagedPeerConsentRead() { if (Current.Value is { } value) value.PagedPeerConsentReads++; }
+#endif
         internal static void CipherScan() { if (Current.Value is { } value) value.CipherScans++; }
         internal static void MetadataRow() { if (Current.Value is { } value) value.MetadataRows++; }
         internal static void SuffixRow() { if (Current.Value is { } value) value.SuffixRows++; }

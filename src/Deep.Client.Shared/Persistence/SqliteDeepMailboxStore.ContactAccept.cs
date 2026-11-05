@@ -1,11 +1,54 @@
 #if DEEP_CLEAN_PRODUCTION
 using System.Buffers.Binary;
 using System.Security.Cryptography;
+using Deep.Client.Shared.Persistence.DeviceV2;
+using Deep.Protocol.ApplicationCore;
+using Microsoft.Data.Sqlite;
 
 namespace Deep.Client.Shared.Persistence;
 
 public sealed partial class SqliteDeepMailboxStore
 {
+    internal static void RequirePagedPeerAcceptanceProjection(SqliteConnection connection,
+        Did2MessagingSessionScope scope, ReadOnlyMemory<byte> expectedHash)
+    {
+        using (var transaction = connection.BeginTransaction(deferred: true))
+        {
+            if (ReadPragma(connection, transaction, "application_id") != ApplicationId ||
+                ReadPragma(connection, transaction, "user_version") != SchemaVersion)
+                throw new InvalidDataException("Paged peer consent has another application generation.");
+            ValidateTransportOutboxSchema(connection, transaction); ValidateDirectInboxState(connection, transaction);
+            var generation = new byte[8]; BinaryPrimitives.WriteUInt64BigEndian(generation, BinaryPrimitives.ReadUInt64BigEndian(scope.Exact[84..]));
+            BindDirectInboxOwner(connection, transaction, scope.LocalAccount.ToArray(), generation, requireExisting: true);
+            using var query = connection.CreateCommand(); query.Transaction = transaction;
+            query.CommandText = "SELECT logical_message_id FROM authenticated_dmc2_inbox WHERE conversation_id=$conversation AND author_account_id=$account AND author_device_id=$device AND content_kind=$kind LIMIT 2;";
+            query.Parameters.AddWithValue("$conversation", scope.Conversation.ToArray());
+            query.Parameters.AddWithValue("$account", (scope.IsInitiator ? scope.RemoteAccount : scope.LocalAccount).ToArray());
+            query.Parameters.AddWithValue("$device", (scope.IsInitiator ? scope.RemoteDevice : scope.LocalDevice).ToArray());
+            query.Parameters.AddWithValue("$kind", (int)Dmc2ContentKind.ContactAccept);
+            byte[] logical;
+            using (var rows = query.ExecuteReader())
+            {
+                if (!rows.Read()) throw new CryptographicException("Paged peer consent lost its application acceptance.");
+                logical = rows.GetFieldValue<byte[]>(0);
+                if (logical.Length != 32 || rows.Read())
+                { CryptographicOperations.ZeroMemory(logical); throw new CryptographicException("Paged peer consent has ambiguous acceptance rows."); }
+            }
+            byte[]? exact = null;
+            try
+            {
+                exact = ReadDirectDmc2InSnapshot(connection, transaction, scope.LocalAccount.ToArray(),
+                    BinaryPrimitives.ReadUInt64BigEndian(scope.Exact[84..]), scope.Conversation.ToArray(), logical,
+                    (scope.IsInitiator ? scope.RemoteDevice : scope.LocalDevice).ToArray());
+                if (exact is null || !DirectFixed(SHA256.HashData(exact), expectedHash.Span))
+                    throw new CryptographicException("Paged peer acceptance projection changed its actual native original.");
+            }
+            finally { CryptographicOperations.ZeroMemory(logical); if (exact is not null) CryptographicOperations.ZeroMemory(exact); }
+        }
+        // Preserve ordinary application's existing physical integrity admission.
+        ValidateCipher(connection);
+    }
+
     internal async Task<byte[]?> ReadContactAcceptAsync(ReadOnlyMemory<byte> account, ulong accountGeneration,
         ReadOnlyMemory<byte> conversation, ReadOnlyMemory<byte> responderAccount, ReadOnlyMemory<byte> responderDevice, CancellationToken ct)
     {

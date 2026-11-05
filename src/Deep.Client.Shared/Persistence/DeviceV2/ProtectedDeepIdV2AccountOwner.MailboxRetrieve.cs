@@ -39,6 +39,12 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             var routeHash = publication.Route.ExactHash.ToArray();
             if (state.Active is { } old && !FixedRoute(old.Route, routeHash))
                 throw new CryptographicException("Resume the original protected mailbox read; silent rerouting is forbidden.");
+            if (state.Active is null)
+            {
+                var restarted = await RestartExpiredIdleTraversalUnderLeaseAsync(current, held, source, fresh,
+                    publication, state, snapshot, instance, ct).ConfigureAwait(false);
+                if (restarted is not null) { CryptographicOperations.ZeroMemory(snapshot); snapshot = restarted; }
+            }
             // Only a new cycle may acquire the selected winner. An interrupted
             // cycle must retain its original grant even after selection changes.
             if (state.Active is null) ProtectedDid2MailboxReadJournal.RequireRoomForNewCycle(snapshot.Length);
@@ -75,6 +81,22 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             var scope = ClientMailboxScope.Derive(loan.Selector.IssuerContext.Span, loan.Route.MailboxId, loan.Route.Epoch);
             var scopeHash = scope.ToArray(); var scopeName = Convert.ToHexString(scopeHash);
             var traversal = await loan.Store.ReadTraversalAsync(scope, ct).ConfigureAwait(false);
+            if (state.Phase == 0 && traversal.AfterCursor != 0)
+            {
+                var candidate = MailboxAuthenticatedRequestTranscript.ForRetrieve(loan.Route.Epoch,
+                    ClientMailboxAdapter.RetrieveOperationId(loan.Route, traversal), loan.Route.MailboxId, loan.Route.PlacementId,
+                    traversal.AfterCursor, ProtectedDid2MailboxReadJournal.NewPageMaximumItems, traversal.ContinuationToken);
+                var expiry = ProtectedDid2MailboxReadJournal.BoundContinuationExpiry(candidate.CanonicalRequest.Span, loan.Grant) ?? throw new CryptographicException();
+                var reading = await RecheckRouteFreshnessAsync(current, source, fresh, held, null, ct).ConfigureAwait(false);
+                var lower = checked(fresh.Proof.TrustedLowerUnixSeconds + checked(reading.SampleSeconds - fresh.Proof.MonotonicSample));
+                if (lower >= expiry)
+                {
+                    var restarted = await RestartExpiredIdleTraversalUnderLeaseAsync(current, held, source, fresh,
+                        publication, state, snapshot, instance, ct).ConfigureAwait(false) ?? throw new CryptographicException();
+                    CryptographicOperations.ZeroMemory(snapshot); snapshot = restarted;
+                    traversal = await loan.Store.ReadTraversalAsync(scope, ct).ConfigureAwait(false);
+                }
+            }
             if (state.Phase == 0)
             {
                 if (!state.Traversals.TryGetValue(scopeName, out var floor))

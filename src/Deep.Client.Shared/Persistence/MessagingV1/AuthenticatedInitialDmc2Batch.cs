@@ -28,6 +28,20 @@ internal sealed class AuthenticatedInitialDmc2Batch : IDisposable
     // Independent DID2 construction: no V1 scope, identity conversion or source-key reopening.
     private AuthenticatedInitialDmc2Batch(byte[] initial, byte[] hello, Did2MessagingSessionScope scope)
     {
+        RequireOwnedDid2SemanticScope(initial, hello, scope);
+#if DEEP_TEST_INTERNALS
+        Did2MessagingSqlJournal.NativeWork.InitialHandoff();
+#endif
+        sessionInit = initial.ToArray(); firstApplication = hello.ToArray();
+        localAccountId = scope.LocalAccount.ToArray(); conversationId = scope.Conversation.ToArray();
+        LocalAccountGeneration = BinaryPrimitives.ReadUInt64BigEndian(scope.Exact[84..]);
+    }
+
+    // Pure facts only. Native source/projection/freshness qualification stays
+    // with the caller; this cannot construct an inbox or ACK capability.
+    internal static void RequireOwnedDid2SemanticScope(ReadOnlySpan<byte> initial, ReadOnlySpan<byte> hello,
+        Did2MessagingSessionScope scope)
+    {
         var init = ApplicationCoreCodec.DecodeDmc2(initial);
         var first = ApplicationCoreCodec.DecodeDmc2(hello);
         var author = scope.IsInitiator ? scope.LocalAccount : scope.RemoteAccount;
@@ -47,9 +61,6 @@ internal sealed class AuthenticatedInitialDmc2Batch : IDisposable
             !Fixed(scope.Conversation, ApplicationCoreVerifier.ComputeContactConversationId(scope.Network,
                 scope.Relationship, scope.LocalAccount, scope.RemoteAccount)))
             throw new CryptographicException("The retained initial batch differs from the owned DID2 semantic scope.");
-        sessionInit = initial.ToArray(); firstApplication = hello.ToArray();
-        localAccountId = scope.LocalAccount.ToArray(); conversationId = scope.Conversation.ToArray();
-        LocalAccountGeneration = BinaryPrimitives.ReadUInt64BigEndian(scope.Exact[84..]);
     }
 
     internal static async Task<AuthenticatedInitialDmc2Batch> FromOwnedDid2Async(

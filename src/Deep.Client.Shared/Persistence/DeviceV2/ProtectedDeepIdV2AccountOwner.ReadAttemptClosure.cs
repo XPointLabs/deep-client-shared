@@ -23,7 +23,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         using var raw = await storage.ReadOwnedAsync(ProtectedDid2MailboxReadJournal.Slot, ct).ConfigureAwait(false) ??
             throw new InvalidDataException("Read recovery lost mandatory protected custody.");
         var snapshot = raw.Use(bytes => bytes.ToArray());
-        byte[] grantsSnapshot = [], originalMau = [];
+        byte[] grantsSnapshot = [], originalMau = [], registrationHash = [], applicationHash = [];
         try
         {
             using var read = ProtectedDid2MailboxReadJournal.Decode(snapshot, networkId, current.AccountId.Span, instance);
@@ -36,10 +36,12 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             var first = await RecheckRouteFreshnessAsync(current, source, fresh, held, null, ct).ConfigureAwait(false);
             var lower = checked(fresh.Proof.TrustedLowerUnixSeconds + checked(first.SampleSeconds - fresh.Proof.MonotonicSample));
             var active = read.Phase is 1 or 2 ? read.Active : null;
+            var activeName = active is null ? null : ProtectedDid2MailboxReadJournal.Name(active.Grant);
             var activeEntry = active is null ? null : OriginalReadAcquisition(grants, active.Grant);
             var activeGrant = activeEntry is null ? null : MailboxAuthenticatedCapabilityCodec.DecodeGrant(
                 ContactCodec.Decode("XMC2", ProtectedDid2MailboxGrantJournal.Response(activeEntry).Span).Field(8).Span);
-            var close = activeGrant is not null && lower >= activeGrant.ExpiresAtUnixSeconds;
+            var close = activeGrant is not null && (lower >= activeGrant.ExpiresAtUnixSeconds ||
+                ProtectedDid2MailboxReadJournal.IsDisjointExpiredContinuation(active!.RetrieveBody, activeGrant, lower));
             if (!close && read.Closed.Count == 0) return;
             if (close && (read.Closed.Count >= ProtectedDid2MailboxReadJournal.MaximumFloors ||
                 read.Closed.ContainsKey(ProtectedDid2MailboxReadJournal.Name(active!.Grant))))
@@ -49,6 +51,11 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 fresh.MailboxAuthority, source.RendezvousTrustedTime, ct).ConfigureAwait(false);
             var fence = await SqliteDeepIdV2AccountGeneration.ReadNativeReplayFenceUnderLeaseAsync(
                 storage, lease, sqlStatePath, current, held, ct).ConfigureAwait(false);
+            using (var registrations = await storage.ReadOwnedBatchAsync(["deep.store.v2.sql-generation", SqliteDeepIdV2AccountGeneration.ApplicationStateSlot], ct).ConfigureAwait(false))
+            {
+                registrationHash = (registrations[0] ?? throw new InvalidDataException()).Use(bytes => SHA256.HashData(bytes));
+                applicationHash = (registrations[1] ?? throw new InvalidDataException()).Use(bytes => SHA256.HashData(bytes));
+            }
             using var application = await SqliteDeepIdV2AccountGeneration.OpenExistingApplicationForOwnerUnderLeaseAsync(
                 storage, sqlStatePath, networkId, current.AccountId, instance, held, lease, ct).ConfigureAwait(false);
             foreach (var prior in read.Closed.Values)
@@ -94,8 +101,13 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                         await Save().ConfigureAwait(false); // Original local preparation, no signing or dispatch.
                     }
                 }
-                else RequireUncapturedReadSql(stored, read.Phase, [], cycle.RetrieveBody,
-                    cycle.Grant, cycle.RetrieveCounter, cycle.RetrieveMauHash);
+                else
+                {
+                    RequireUncapturedReadSql(stored, read.Phase, [], cycle.RetrieveBody,
+                        cycle.Grant, cycle.RetrieveCounter, cycle.RetrieveMauHash);
+                    if (lower < grant.ExpiresAtUnixSeconds)
+                        throw new CryptographicException("Unprepared Retrieve cannot use signed-MAU continuation closure.");
+                }
                 var closed = ProtectedDid2MailboxReadJournal.ClosedAttempt.Capture(cycle, read.Phase,
                     grant.ExpiresAtUnixSeconds, lower, originalMau);
                 read.Closed.Add(ProtectedDid2MailboxReadJournal.Name(closed.Grant), closed);
@@ -136,14 +148,40 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                     storage, lease, sqlStatePath, current, held, ct).ConfigureAwait(false);
                 if (fence.Kind != after.Kind || !FixedRoute(fence.Selector.Span, after.Selector.Span) || !FixedRoute(fence.Digest.Span, after.Digest.Span))
                     throw new CryptographicException("Read recovery changed its native SQL fence.");
-                await RequireExactProtectedMailboxRootAsync(ProtectedDid2MailboxGrantJournal.Slot, grantsSnapshot, ct).ConfigureAwait(false);
-                await RequireExactProtectedMailboxRootAsync(ProtectedDid2MailboxReadJournal.Slot, snapshot, ct).ConfigureAwait(false);
+                using (var roots = await storage.ReadOwnedBatchAsync(["deep.store.v2.sql-generation", SqliteDeepIdV2AccountGeneration.ApplicationStateSlot,
+                    ProtectedDid2MailboxGrantJournal.Slot, ProtectedDid2MailboxReadJournal.Slot], ct).ConfigureAwait(false))
+                    if (roots[0] is null || roots[1] is null || roots[2] is null || roots[3] is null ||
+                        !roots[0]!.Use(bytes => FixedRoute(SHA256.HashData(bytes), registrationHash)) ||
+                        !roots[1]!.Use(bytes => FixedRoute(SHA256.HashData(bytes), applicationHash)) ||
+                        !roots[2]!.Use(bytes => FixedRoute(bytes, grantsSnapshot)) || !roots[3]!.Use(bytes => FixedRoute(bytes, snapshot)))
+                        throw new CryptographicException("Read closure lost its exact account/application/read/grant custody.");
+                // Provider/CAS callbacks cannot convert or remove the original
+                // outcome between its first read and protected closure.
+                foreach (var prior in read.Closed.Values)
+                {
+                    var entry = OriginalReadAcquisition(grants, prior.Grant);
+                    var grant = MailboxAuthenticatedCapabilityCodec.DecodeGrant(ContactCodec.Decode("XMC2",
+                        ProtectedDid2MailboxGrantJournal.Response(entry).Span).Field(8).Span);
+                    var operation = prior.Phase == 3
+                        ? MailboxAuthenticatedRequestTranscript.DecodeAckBody(MailboxAuthenticatedClientRequestCodec.Decode(prior.ExactMau).Binding.CanonicalRequest.Span).OperationId
+                        : MailboxAuthenticatedRequestTranscript.DecodeRetrieveBody(prior.RetrieveBody).OperationId;
+                    var actual = await application.ReadTransportOutboxAsync(VerifiedCurrentMailboxGrant.AccountScopeForHolder(grant.HolderPublicKey.Span),
+                        OutboxLogicalId.FromBytes(operation.Span), ct).ConfigureAwait(false);
+                    RequireUncapturedReadSql(actual, prior.Phase, prior.ExactMau, prior.RetrieveBody, prior.Grant, prior.Counter, prior.MauHash);
+                }
+                if (close && activeName is not null && !read.Closed.ContainsKey(activeName))
+                {
+                    var cycle = read.Active ?? throw new CryptographicException("Original active read disappeared during closure.");
+                    var actual = await application.ReadTransportOutboxAsync(VerifiedCurrentMailboxGrant.AccountScopeForHolder(activeGrant!.HolderPublicKey.Span),
+                        OutboxLogicalId.FromBytes(MailboxAuthenticatedRequestTranscript.DecodeRetrieveBody(cycle.RetrieveBody).OperationId.Span), ct).ConfigureAwait(false);
+                    RequireUncapturedReadSql(actual, read.Phase, originalMau, cycle.RetrieveBody, cycle.Grant, cycle.RetrieveCounter, cycle.RetrieveMauHash);
+                }
                 ct.ThrowIfCancellationRequested(); held.RequireOwner(lease);
             }
         }
         finally
         {
-            foreach (var bytes in new[] { snapshot, grantsSnapshot, originalMau }) CryptographicOperations.ZeroMemory(bytes);
+            foreach (var bytes in new[] { snapshot, grantsSnapshot, originalMau, registrationHash, applicationHash }) CryptographicOperations.ZeroMemory(bytes);
         }
     }
 
