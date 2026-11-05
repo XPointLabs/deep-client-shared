@@ -783,7 +783,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
 
         // Controlled, actual signed producer fixture. This stages selection for
         // consumer tests; it is NOT runtime renewal/compaction or device evidence.
-        internal async Task StageVerifiedGrantSuccessorAsync(OwnedGrantTransport transport, bool own)
+        internal async Task StageVerifiedGrantSuccessorAsync(OwnedGrantTransport transport, bool own, byte seedMarker = 0x99)
         {
             var selected = own ? innerStorage : peerStorage;
             using var generation = await selected.ReadOwnedAsync("deep.store.v2.sql-generation") ?? throw new InvalidOperationException();
@@ -800,7 +800,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                 var requestRecord = ContactCodec.Decode("XMG2", ProtectedDid2MailboxGrantJournal.Request(old).Span);
                 var locator = requestRecord.Field(3); var capability = requestRecord.Field(4);
                 var domain = (MailboxCapabilityDomain)requestRecord.Field(6).Span[0];
-                seed = Bytes(32, 0x99);
+                seed = Bytes(32, seedMarker);
                 byte[] pending, next;
                 if (domain == MailboxCapabilityDomain.Deposit)
                 {

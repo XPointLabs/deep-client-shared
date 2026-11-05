@@ -44,6 +44,8 @@ internal sealed class Did2StorePublicEvidence
     internal Did2StorePublicEvidence WithCommitment(ReadOnlyMemory<byte> commitment) =>
         new(records[0], records[1], records[2], Replicas, records[6], records[7], records[8], commitment);
     internal byte[][] CopyRecords() => records.Select(bytes => bytes.ToArray()).ToArray();
+    internal void CloseOwnedRecords()
+    { foreach (var bytes in records) CryptographicOperations.ZeroMemory(bytes); }
 }
 
 public sealed partial class SqliteDeepMailboxStore

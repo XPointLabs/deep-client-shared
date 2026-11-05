@@ -193,9 +193,8 @@ public sealed partial class DeepIdV2AccountService
             // Preserve order within a session. Distinct sessions drain concurrently;
             // each child still uses the existing native/Store authority fences.
             using var concurrency = new SemaphoreSlim(4);
-            // Current transport loans hold the actual account lock. Queue
-            // account operations before minting a loan, rather than making
-            // sibling targets exhaust the bounded file-lock wait.
+            // Local preparation remains ordered. Store releases the account only
+            // at its real transport wait, with independent per-grant exclusion.
             using var accountOperations = new SemaphoreSlim(1);
             var tasks = conversations.Select(async target =>
             {
@@ -232,17 +231,17 @@ public sealed partial class DeepIdV2AccountService
             finally { accountOperations.Release(); }
             foreach (var item in batch)
             {
-                await accountOperations.WaitAsync(ct).ConfigureAwait(false);
-                try
+                if (!retained.Contains(Convert.ToHexString(item.Operation)))
                 {
-                    if (!retained.Contains(Convert.ToHexString(item.Operation)))
+                    await accountOperations.WaitAsync(ct).ConfigureAwait(false);
+                    try
                     {
                         using var native = await SendOwnMessagingAsync(conversation.Scope, item.Operation, item.Event, source, ct).ConfigureAwait(false);
-                        var stored = await DeliverOwnMessagingAsync(conversation.Scope, item.Operation, source, ct).ConfigureAwait(false);
-                        if (stored.IngressDispatched) ClientDeliveryEvents.Reached(ClientDeliveryPhase.StoreQuorum, item.Event);
                     }
+                    finally { accountOperations.Release(); }
+                    var stored = await DeliverOwnMessagingAsync(conversation.Scope, item.Operation, source, ct).ConfigureAwait(false);
+                    if (stored.IngressDispatched) ClientDeliveryEvents.Reached(ClientDeliveryPhase.StoreQuorum, item.Event);
                 }
-                finally { accountOperations.Release(); }
             }
             return batch.Count;
         }

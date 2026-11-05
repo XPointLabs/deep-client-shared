@@ -128,13 +128,42 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         IDid2MailboxGrantTransport grants, IDid2OwnedMailboxTransportFactory transport,
         OwnedMailboxPayloadKind payloadKind, CancellationToken ct)
     {
+        while (true)
+        {
+            try
+            {
+                return await DeliverOwnedMailboxCoreAsync(unixSeconds, verifier, scope, operation,
+                    initialIntent, source, resolved, ordinaryOwn, ordinaryPeer, grants, transport, payloadKind, ct).ConfigureAwait(false);
+            }
+            catch (MailboxGrantFlightBusy busy)
+            {
+                // Core has disposed its account lease and every private loan.
+                // Never wait for a grant while preventing its owner from rejoining.
+                using var available = await busy.GrantLease.AcquireAsync(ct).ConfigureAwait(false);
+            }
+        }
+    }
+
+    private async Task<ClientMailboxStoreResult> DeliverOwnedMailboxCoreAsync(ulong unixSeconds,
+        IDeepMlDsa65Verifier verifier, Did2MessagingSessionScope scope, ReadOnlyMemory<byte> operation,
+        ReadOnlyMemory<byte> initialIntent, DeepIdV2ContactPathAuthoritySource source,
+        DeepIdV2ContactPathAuthoritySource.PermanentContactAuthority? resolved,
+        DeepIdV2ContactPathAuthoritySource.OwnPreKeyAuthoringAuthority? ordinaryOwn,
+        VerifiedDeepIdV2DirectoryFreshness? ordinaryPeer,
+        IDid2MailboxGrantTransport grants, IDid2OwnedMailboxTransportFactory transport,
+        OwnedMailboxPayloadKind payloadKind, CancellationToken ct)
+    {
         ProtectedDph2PreClaimJournal.RequireIntent(operation.Span);
-        var op = operation.ToArray(); byte[] snapshot = [], grantRoot = [], instance = [], exactMau = [], envelopeBytes = [], attemptId = [];
-        OriginalDepositAcquisition? originalAcquisition = null;
+        OwnedDid2MessagingStorage opened = null!;
+        VerifiedDeepIdV2CurrentAccount current = null!;
+        MailboxInstallationPolicy? liveDispatchPolicy = null;
+        Did2OwnedMailboxTransportContext? liveTransportContext = null;
+        OriginalDepositAcquisition? liveOriginalAcquisition = null;
+        var op = operation.ToArray(); byte[] snapshot = [], grantRoot = [], instance = [], exactMau = [], envelopeBytes = [], attemptId = [], outboxFence = [];
         try
         {
             using var held = await lease.AcquireAsync(ct).ConfigureAwait(false);
-            using var current = await RequireCurrentUnderLeaseAsync(unixSeconds, verifier, ct).ConfigureAwait(false);
+            current = await RequireCurrentUnderLeaseAsync(unixSeconds, verifier, ct).ConfigureAwait(false);
             var contact = resolved is not null
                 ? await RecheckPermanentContactUnderLeaseAsync(current, source, resolved, held, ct).ConfigureAwait(false) : default;
             var fresh = resolved?.Own ?? ordinaryOwn ?? throw new CryptographicException("Ordinary dispatch has no current owned endpoint.");
@@ -142,7 +171,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 throw new CryptographicException("Ordinary dispatch has no independently current session peer.");
             var first = await RequireMessagingFreshnessAsync(current, fresh, peer, source, held, ct).ConfigureAwait(false);
             OwnedInitialMessagingSeed.RequireFreshScope(scope, fresh.Proof, peer, first);
-            using var opened = await OpenNativeMessagingUnderLeaseAsync(current, scope, held, ct).ConfigureAwait(false);
+            opened = await OpenNativeMessagingUnderLeaseAsync(current, scope, held, ct).ConfigureAwait(false);
             if (payloadKind == OwnedMailboxPayloadKind.RouteReintroduction)
             {
                 if (resolved is null || !initialIntent.IsEmpty) throw new CryptographicException("Re-introduction requires independent current publication custody.");
@@ -226,7 +255,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 entry is null ? null : entry.GrantHash.ToArray(), current, instance, held, source, fresh, ct).ConfigureAwait(false);
             async Task Recheck(CancellationToken token)
             {
-                if (originalAcquisition is not null) await originalAcquisition.RecheckAsync(token).ConfigureAwait(false);
+                if (liveOriginalAcquisition is not null) await liveOriginalAcquisition.RecheckAsync(token).ConfigureAwait(false);
                 await RequireFinalMessagingFreshnessAsync(current, scope, fresh, peer, source, held, first, token).ConfigureAwait(false);
                 await RequireMailboxRetryTimeUnderLeaseAsync(current, source, fresh, held,
                     Math.Min(applicationRetryUntil, sends.Current(scope.Hash, op)?.RetryUntil ?? ulong.MaxValue), token).ConfigureAwait(false);
@@ -253,6 +282,8 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 finally { CryptographicOperations.ZeroMemory(retained); }
                 if (controlPayload)
                     await RequireBraidStorePurposeUnderLeaseAsync(opened, scope, op, envelopeBytes, held, token).ConfigureAwait(false);
+                else if (initialIntent.IsEmpty)
+                    await RequireOrdinaryWorkNotStoppedUnderLeaseAsync(scope, op, held, token).ConfigureAwait(false);
                 await RequireExactProtectedMailboxRootAsync(ProtectedDid2MailboxSendJournal.Slot, snapshot, token).ConfigureAwait(false);
                 if (sends.Current(scope.Hash, op) is { Closed: true } || entry?.HasPredecessor == true)
                     await RequireClosedMailboxChainForSuccessorUnderLeaseAsync(current, held, opened, scope, op,
@@ -267,12 +298,14 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 grantRoot = root.Use(bytes => bytes.ToArray());
             using var grantState = ProtectedDid2MailboxGrantJournal.Decode(grantRoot, networkId, current.AccountId.Span, instance);
             var grantName = Convert.ToHexString(ProtectedDid2MailboxGrantJournal.Scope(routeHash, locator.Span, (byte)MailboxCapabilityDomain.Deposit));
-            if (entry is not null) originalAcquisition = await ReadOriginalDepositAcquisitionUnderLeaseAsync(held,
-                current.AccountId, instance, grantRoot, entry.GrantHash.ToArray(), ct, grantName).ConfigureAwait(false);
-            var retainedGrant = entry is not null
-                ? originalAcquisition!.Entry
-                : ProtectedDid2MailboxGrantJournal.CurrentWinner(grantState, grantName) ??
-                    throw new CryptographicException("Dispatch has no selected protected grant winner.");
+            var selectedGrantHash = entry?.GrantHash.ToArray() ?? SHA256.HashData(winner!.ExactGrant.Span);
+            try
+            {
+                liveOriginalAcquisition = await ReadOriginalDepositAcquisitionUnderLeaseAsync(held,
+                    current.AccountId, instance, grantRoot, selectedGrantHash, ct, grantName).ConfigureAwait(false);
+            }
+            finally { CryptographicOperations.ZeroMemory(selectedGrantHash); }
+            var retainedGrant = liveOriginalAcquisition.Entry;
             if (winner is not null && !FixedRoute(ProtectedDid2MailboxGrantJournal.Response(retainedGrant).Span, winner.ExactXmc2.Span))
                 throw new CryptographicException("Dispatch changed its acquired winner.");
             winner ??= await DeepIdV2MailboxGrantResultVerifier.VerifyRetainedSuccessAsync(route,
@@ -281,10 +314,13 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             var grantHash = SHA256.HashData(winner.ExactGrant.Span);
             if (predecessor is not null && FixedRoute(predecessor.GrantHash, grantHash))
                 throw new CryptographicException("A closed attempt cannot reuse its original grant.");
+            var flightLease = new DeepIdV2AccountFileLease(lease.ExactPath + ".store-" + MailboxGrantFlightStripe(grantHash));
+            using var grantFlight = flightLease.TryAcquire() ?? throw new MailboxGrantFlightBusy(flightLease);
             using var loan = await OpenMailboxWinnerUnderLeaseAsync(current, held, route, winner, locator, capability,
                 retainedGrant, source, fresh, Recheck, ct).ConfigureAwait(false);
             if (entry is null && sends.Entries.Values.Any(value => !value.Prepared && FixedRoute(value.GrantHash, grantHash)))
                 throw new IOException("Resume the pending protected mailbox request or perform verified rollover.");
+            await RequireMailboxGrantOrderUnderLeaseAsync(sends, loan, scope, fresh, op, grantHash, ct).ConfigureAwait(false);
             var created = entry?.Created ?? loan.Authority.NowUnixSeconds;
             // The short grant permits this attempt, not the accepted object's
             // retention. Exact retry retains the original signed body expiry.
@@ -443,12 +479,14 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 var dispatchPma = MailboxAuthorityV2Verifier.Verify(route.NetworkAuthority, winner.ExactPma2.Span,
                     dispatchTime.LowerUnixSeconds, dispatchTime.UpperUnixSeconds);
                 RequireMailboxPolicyProjection(route, dispatchPma, fresh);
-                using var dispatchPolicy = new MailboxInstallationPolicy(held, route, dispatchPma, loan.Grant, dispatchTime, dispatchStarted,
+                var dispatchPolicy = new MailboxInstallationPolicy(held, route, dispatchPma, loan.Grant, dispatchTime, dispatchStarted,
                     minimumPreparedUpper);
+                liveDispatchPolicy = dispatchPolicy;
                 var dispatchAuthority = new VerifiedOfficialMailboxAuthority(dispatchPma.NetworkId, dispatchPma.MinimumGrantGeneration,
                     [dispatchPma.ResolveIssuer(loan.Grant.Domain)], false, static () => true, dispatchPolicy, dispatchPolicy.Clock);
                 var dispatchFactory = new MailboxAuthenticatedRequestFactory(loan.Store, dispatchAuthority);
                 var context = new Did2OwnedMailboxTransportContext(source, custody, current, fresh, held, route, winner);
+                liveTransportContext = context;
                 var decoder = new OwnedMailboxDecodePolicy(loan.Grant, dispatchAuthority);
                 async Task Guard(CancellationToken token)
                 {
@@ -465,6 +503,131 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 var adapter = new ClientMailboxAdapter(ClientFeatureFlags.ReleaseDefaults with { ClientMailboxAdapterEnabled = true },
                     new(true, loan.Selector.IssuerContext.Span, true), ingress, loan.Store, loan.Store, loan.Store, loan.Store,
                     new PinnedClientMailboxReceiptVerifier(new SodiumMailboxPeerReplicationCrypto()), dispatchFactory, decoder, dispatchAuthority.TimeProvider);
+                var ordinaryStore = resolved is null && initialIntent.IsEmpty && !controlPayload &&
+                    await IsOrdinaryStoreHandoffUnderLeaseAsync(scope, op, held, ct).ConfigureAwait(false);
+                if (ordinaryStore)
+                {
+                    context.ConfigureOrdinaryStoreWait(async token =>
+                    {
+                        outboxFence = await ReadStoreWaitOutboxFenceAsync(loan.Store, loan,
+                            envelope.OperationId, exactMau, token).ConfigureAwait(false);
+                        await Guard(token).ConfigureAwait(false);
+                    }, Guard, async (pending, token) =>
+                    {
+                        // ForwardAsync has accepted the immutable built frame under
+                        // the final current lease. Drop all private local loans before
+                        // releasing ownership for its actual asynchronous network wait.
+                        var selectedGrantFence = SHA256.HashData(retainedGrant);
+                        var minimumGrantRevision = grantState.Revision;
+                        var originalDispatchEnd = dispatchPolicy.ExpiresAtUnixSeconds;
+                        var routeHeadFence = privateContact!.HeadEventHash.ToArray();
+                        var consentFence = privateContact.Inputs?.AcceptanceProjection.ToArray() ?? [];
+                        var evidenceFence = StoreWaitEvidenceFence(publicEvidence);
+#if DEEP_TEST_INTERNALS
+                        var privateObservation = new Did2StoreHandoffPrivateObservation(
+                            [grantRoot, liveOriginalAcquisition!.Entry, .. grantState.Entries.Values], current, loan, loan.Store, publicEvidence, context);
+                        Did2StoreHandoffTestHooks.Observe(false, privateObservation);
+#endif
+                        loan.CloseForNetworkWait(); opened.Dispose(); opened = null!;
+                        context.CloseForNetworkWait(); current.Dispose(); current = null!;
+                        dispatchPolicy.Dispose(); publicEvidence.CloseOwnedRecords();
+                        liveOriginalAcquisition!.Dispose(); liveOriginalAcquisition = null; retainedGrant = [];
+                        grantState.Dispose(); CryptographicOperations.ZeroMemory(grantRoot); grantRoot = [];
+                        // Drop capability-bearing immutable Protocol graphs. They
+                        // are reconstructed only from current authenticated custody.
+                        route = null!; winner = null; privateContact = null;
+                        locator = default; capability = default;
+                        held.SuspendForNetworkWait();
+#if DEEP_TEST_INTERNALS
+                        Did2StoreHandoffTestHooks.Observe(true, privateObservation);
+#endif
+                        byte[] reply = [];
+                        try
+                        {
+                            try
+                            {
+                                var returned = await pending.WaitAsync(token).ConfigureAwait(false);
+                                if (returned.IsEmpty || returned.Length > Deep.Protocol.DeepExtension.ManagedIngress.ManagedIngressLimits.MaximumOpaqueFrameBytes)
+                                    throw new InvalidDataException("Store handoff response exceeds its closed transport bound.");
+                                reply = returned.ToArray();
+                            }
+                            finally
+                            {
+                                // Cancellation must not strand a suspended owner or let
+                                // a late callback touch SQL outside account ownership.
+                                using var rejoinDeadline = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+                                await held.RejoinAfterNetworkWaitAsync(rejoinDeadline.Token).ConfigureAwait(false);
+                            }
+                            token.ThrowIfCancellationRequested();
+                            current = await RequireCurrentUnderLeaseAsync(unixSeconds, verifier, token).ConfigureAwait(false);
+                            if (!FixedRoute(current.AccountId.Span, scope.LocalAccount))
+                                throw new CryptographicException("Store rejoined another current account.");
+                            var rejoinedInstance = await SqliteDeepIdV2AccountGeneration.ReadAccountInstanceUnderLeaseAsync(
+                                storage, networkId, current.AccountId, token).ConfigureAwait(false);
+                            try
+                            {
+                                if (!FixedRoute(rejoinedInstance, instance))
+                                    throw new CryptographicException("Store rejoined another account instance.");
+                            }
+                            finally { CryptographicOperations.ZeroMemory(rejoinedInstance); }
+                            // Deny stale/revoked/stopped work before reopening any
+                            // mutable native/application recovery boundary.
+                            if (MailboxInstallationUpperAtElapsed(dispatchTime.UpperUnixSeconds, minimumPreparedUpper,
+                                Stopwatch.GetElapsedTime(dispatchStarted)) >= originalDispatchEnd)
+                                throw new CryptographicException("Store reply crossed its original authenticated dispatch interval.");
+                            await RequireFinalMessagingFreshnessAsync(current, scope, fresh, peer, source, held, first, token).ConfigureAwait(false);
+                            await RequireMailboxRetryTimeUnderLeaseAsync(current, source, fresh, held,
+                                Math.Min(originalDispatchEnd, Math.Min(applicationRetryUntil, sends.Current(scope.Hash, op)?.RetryUntil ?? ulong.MaxValue)), token).ConfigureAwait(false);
+                            await RequireOrdinaryWorkNotStoppedUnderLeaseAsync(scope, op, held, token).ConfigureAwait(false);
+                            var refreshed = await ReadMailboxStoreRejoinRootsUnderLeaseAsync(current, held, scope, op,
+                                sends, grantHash, grantName, selectedGrantFence, minimumGrantRevision, instance, token).ConfigureAwait(false);
+                            CryptographicOperations.ZeroMemory(snapshot); snapshot = refreshed.Send;
+                            CryptographicOperations.ZeroMemory(grantRoot); grantRoot = refreshed.Grants;
+                            liveOriginalAcquisition = refreshed.Acquisition;
+                            opened = await OpenNativeMessagingUnderLeaseAsync(current, scope, held, token).ConfigureAwait(false);
+                            var nextRoute = await ReadAuthenticatedPeerMailboxRouteUnderLeaseAsync(current, opened,
+                                fresh, peer, source, held, token).ConfigureAwait(false);
+                            if (!FixedRoute(SHA256.HashData(nextRoute.Route.ExactRouteClosure.Span), routeHash) ||
+                                !FixedRoute(nextRoute.HeadEventHash.Span, routeHeadFence) ||
+                                consentFence.Length != 0 && (nextRoute.Inputs is null ||
+                                    !FixedRoute(nextRoute.Inputs.AcceptanceProjection, consentFence)))
+                                throw new CryptographicException("Store rejoin changed its selected peer route or consent.");
+                            privateContact = nextRoute; route = nextRoute.Route;
+                            locator = nextRoute.LocatorHash; capability = route.Route.Reachability.Field(10);
+                            var selectedGrant = liveOriginalAcquisition.Entry;
+                            winner = await DeepIdV2MailboxGrantResultVerifier.VerifyRetainedSuccessAsync(route,
+                                ProtectedDid2MailboxGrantJournal.Request(selectedGrant), ProtectedDid2MailboxGrantJournal.Response(selectedGrant),
+                                fresh.MailboxAuthority.ExactPma2, token).ConfigureAwait(false);
+                            var currentCustody = await SqliteDeepIdV2AccountGeneration.OpenBorrowedOnionCustodyAsync(
+                                storage, lease, sqlStatePath, current, source.AccountOwner, held, token).ConfigureAwait(false);
+                            context = new Did2OwnedMailboxTransportContext(source, currentCustody, current, fresh, held, route, winner);
+                            liveTransportContext = context;
+                            dispatchPolicy = new MailboxInstallationPolicy(held, route, dispatchPma, loan.Grant,
+                                dispatchTime, dispatchStarted, minimumPreparedUpper);
+                            liveDispatchPolicy = dispatchPolicy;
+                            dispatchAuthority = new VerifiedOfficialMailboxAuthority(dispatchPma.NetworkId, dispatchPma.MinimumGrantGeneration,
+                                [dispatchPma.ResolveIssuer(loan.Grant.Domain)], false, static () => true, dispatchPolicy, dispatchPolicy.Clock);
+                            decoder.RejoinAuthority(dispatchAuthority);
+                            var reopened = await SqliteDeepIdV2AccountGeneration.OpenApplicationUnderLeaseAsync(
+                                storage, sqlStatePath, current, held, token).ConfigureAwait(false);
+                            loan.RejoinStore(reopened);
+                            var actualOutbox = await ReadStoreWaitOutboxFenceAsync(reopened, loan, envelope.OperationId, exactMau, token).ConfigureAwait(false);
+                            try
+                            {
+                                if (!FixedRoute(actualOutbox, outboxFence))
+                                    throw new CryptographicException("Store rejoin changed its original SQL attempt.");
+                            }
+                            finally { CryptographicOperations.ZeroMemory(actualOutbox); }
+                            publicEvidence = await reopened.RequireStorePublicEvidenceAsync(scope, op, entry.Attempt.ToArray(), token).ConfigureAwait(false);
+                            if (!FixedRoute(StoreWaitEvidenceFence(publicEvidence), evidenceFence))
+                                throw new CryptographicException("Store rejoin changed its exact original public evidence.");
+                            adapter.RejoinOwnedStore(reopened, new MailboxAuthenticatedRequestFactory(reopened, dispatchAuthority), held, dispatchAuthority.TimeProvider);
+                            await Guard(token).ConfigureAwait(false);
+                            return reply;
+                        }
+                        catch { CryptographicOperations.ZeroMemory(reply); throw; }
+                    });
+                }
                 using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct); deadline.CancelAfter(TimeSpan.FromSeconds(30));
                 // The ingress performs the full pre-callback fence. Avoid an
                 // identical reconstruction immediately before adapter SQL
@@ -476,8 +639,10 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 var dispatchValidated = false;
                 try
                 {
-                    var result = await adapter.DispatchPreparedStoreAsync(loan.Selector.AccountScope, loan.Selector, prepared, deadline.Token)
-                        .WaitAsync(deadline.Token).ConfigureAwait(false);
+                    var dispatch = adapter.DispatchPreparedStoreAsync(loan.Selector.AccountScope, loan.Selector, prepared, deadline.Token);
+                    var result = ordinaryStore
+                        ? await dispatch.ConfigureAwait(false)
+                        : await dispatch.WaitAsync(deadline.Token).ConfigureAwait(false);
                     await Guard(deadline.Token).ConfigureAwait(false);
                     if (result.Cursor is null || result.Disposition is not (MailboxReplicaDisposition.Stored or MailboxReplicaDisposition.Duplicate))
                         throw new CryptographicException("Owned Store did not retain a verified durable storage result.");
@@ -517,12 +682,13 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                     return result;
                 }
                 catch (Exception error) when (ingress.Attempted &&
-                    error is CryptographicException or IOException or InvalidOperationException or OperationCanceledException)
+                    (error is CryptographicException or IOException or InvalidOperationException or OperationCanceledException ||
+                        ordinaryStore && error is Deep.Protocol.DeepExtension.PrivacyRouting.OnionBoundaryException or TimeoutException or MailboxReceiptException))
                 {
                     // A returned bounded response is untrusted input, not a fresh
                     // dispatch capability. Authenticate original custody under this
                     // SAME owner lease; never re-sign or re-dispatch an expired grant.
-                    if (!dispatchValidated && !ingress.OriginalReply.IsEmpty)
+                    if (!ordinaryStore && !dispatchValidated && !ingress.OriginalReply.IsEmpty)
                         return await AdoptOriginalMailboxStoreReplyUnderLeaseAsync(current, held, opened, verifier,
                             scope, op, entry.Attempt.ToArray(), initialIntent, ingress.OriginalReply, fresh, source, ct)
                             .ConfigureAwait(false);
@@ -532,7 +698,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             }
             finally { CryptographicOperations.ZeroMemory(ciphertext); }
         }
-        finally { originalAcquisition?.Dispose(); foreach (var value in new[] { op, snapshot, grantRoot, instance, exactMau, envelopeBytes, attemptId }) CryptographicOperations.ZeroMemory(value); }
+        finally { liveOriginalAcquisition?.Dispose(); liveTransportContext?.Dispose(); liveDispatchPolicy?.Dispose(); current?.Dispose(); opened?.Dispose(); foreach (var value in new[] { op, snapshot, grantRoot, instance, exactMau, envelopeBytes, attemptId, outboxFence }) CryptographicOperations.ZeroMemory(value); }
     }
 
     // Denial-only preflight for a new ordinary command / ratchet transition.
@@ -770,11 +936,15 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         }
     }
 
-    private static byte[] MailboxSendOperation(Did2MessagingSessionScope scope, ReadOnlySpan<byte> operation, ReadOnlySpan<byte> dpe)
+    private static byte[] MailboxSendOperation(Did2MessagingSessionScope scope, ReadOnlySpan<byte> operation, ReadOnlySpan<byte> dpe) =>
+        MailboxSendOperation(scope.Network, scope.LocalAccount, scope.Hash, operation, dpe);
+
+    internal static byte[] MailboxSendOperation(ReadOnlySpan<byte> network, ReadOnlySpan<byte> account,
+        ReadOnlySpan<byte> scopeHash, ReadOnlySpan<byte> operation, ReadOnlySpan<byte> dpe)
     {
         using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
         hash.AppendData("Deep/Local/DID2/MailboxStoreOperation/1"u8); hash.AppendData([0]);
-        hash.AppendData(scope.Network); hash.AppendData(scope.LocalAccount); hash.AppendData(scope.Hash);
+        hash.AppendData(network); hash.AppendData(account); hash.AppendData(scopeHash);
         hash.AppendData(operation); hash.AppendData(SHA256.HashData(dpe)); return hash.GetHashAndReset()[..16];
     }
 
@@ -832,6 +1002,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
 
     private sealed class OwnedMailboxDecodePolicy(MailboxAuthenticatedGrant grant, VerifiedOfficialMailboxAuthority authority) : IMailboxClientDecodePolicyProvider
     {
+        internal void RejoinAuthority(VerifiedOfficialMailboxAuthority current) => authority = current;
         public MailboxClientDecodePolicy GetCurrent() => new()
         {
             NowUnixSeconds = authority.NowUnixSeconds,

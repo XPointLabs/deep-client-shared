@@ -12,16 +12,18 @@ namespace Deep.Client.Shared.Services.ContactV2;
 
 // Closed internal account-operation loan, not a fresh-proof fetch or grant
 // installation factory. Only the owner composes this from its held read-back.
-internal sealed class Did2OwnedMailboxTransportContext : IMailboxPrivacyNetworkAuthoritySource
+internal sealed class Did2OwnedMailboxTransportContext : IMailboxPrivacyNetworkAuthoritySource, IDisposable
 {
-    private readonly VerifiedDeepIdV2CurrentAccount account;
+    private VerifiedDeepIdV2CurrentAccount? account;
     private readonly DeepIdV2ContactPathAuthoritySource.OwnPreKeyAuthoringAuthority fresh;
     private readonly HeldDeepIdV2AccountLease held;
-    private readonly VerifiedDeepIdV2MailboxRouteClosure? route;
-    private readonly VerifiedDeepIdV2MailboxGrant? grant;
+    private VerifiedDeepIdV2MailboxRouteClosure? route;
+    private VerifiedDeepIdV2MailboxGrant? grant;
     private readonly VerifiedMailboxRetainedReadGrantV2? retainedRead;
     private readonly byte[]? originalRoute;
     private readonly long started = Stopwatch.GetTimestamp();
+    private readonly CancellationTokenSource lifetime = new();
+    private bool disposed;
 
     internal Did2OwnedMailboxTransportContext(DeepIdV2ContactPathAuthoritySource source,
         DeepIdV2OnionClientCustody custody, VerifiedDeepIdV2CurrentAccount account,
@@ -29,7 +31,7 @@ internal sealed class Did2OwnedMailboxTransportContext : IMailboxPrivacyNetworkA
         HeldDeepIdV2AccountLease held, VerifiedDeepIdV2MailboxRouteClosure route,
         VerifiedDeepIdV2MailboxGrant grant)
     {
-        Source = source; Custody = custody; this.account = account; this.fresh = fresh;
+        Source = source; Custody = custody.RestrictToLifetime(lifetime.Token); this.account = account; this.fresh = fresh;
         this.held = held; this.route = route; this.grant = grant;
         source.RequireAccountOwner(custody.Owner); held.RequireActive();
         if (!ReferenceEquals(route.Network, fresh.Network))
@@ -42,7 +44,7 @@ internal sealed class Did2OwnedMailboxTransportContext : IMailboxPrivacyNetworkA
         HeldDeepIdV2AccountLease held, ReadOnlyMemory<byte> exactOriginalRoute,
         VerifiedMailboxRetainedReadGrantV2 retainedRead)
     {
-        Source = source; Custody = custody; this.account = account; this.fresh = fresh;
+        Source = source; Custody = custody.RestrictToLifetime(lifetime.Token); this.account = account; this.fresh = fresh;
         this.held = held; this.retainedRead = retainedRead;
         originalRoute = ContactRouteClosureCodec.Decode(exactOriginalRoute.Span).ExactBytes.ToArray();
         source.RequireAccountOwner(custody.Owner); held.RequireActive();
@@ -56,16 +58,59 @@ internal sealed class Did2OwnedMailboxTransportContext : IMailboxPrivacyNetworkA
     internal DeepIdV2ContactPathAuthoritySource Source { get; }
     internal DeepIdV2OnionClientCustody Custody { get; }
 
+    private Func<Task<ReadOnlyMemory<byte>>, CancellationToken, Task<ReadOnlyMemory<byte>>>? networkWait;
+    private Func<CancellationToken, Task>? beforeForward;
+    private Func<CancellationToken, Task>? afterForward;
+    private int forwarded;
+    internal void ConfigureOrdinaryStoreWait(Func<CancellationToken, Task> guard,
+        Func<CancellationToken, Task> returnGuard, Func<Task<ReadOnlyMemory<byte>>, CancellationToken, Task<ReadOnlyMemory<byte>>> wait)
+    {
+        held.RequireActive();
+        if (networkWait is not null) throw new InvalidOperationException("Store handoff is already bound.");
+        beforeForward = guard ?? throw new ArgumentNullException(nameof(guard));
+        afterForward = returnGuard ?? throw new ArgumentNullException(nameof(returnGuard));
+        networkWait = wait ?? throw new ArgumentNullException(nameof(wait));
+    }
+
+    // Invoke the real transport while ownership is still held. Preparation and
+    // synchronous dispatch failure never release the account lease.
+    internal async Task<ReadOnlyMemory<byte>> ForwardStoreAsync(
+        Func<Task<ReadOnlyMemory<byte>>> forward, CancellationToken ct)
+    {
+        RequireLive(); held.RequireActive(); ct.ThrowIfCancellationRequested();
+        if (networkWait is not null)
+        {
+            if (Interlocked.Exchange(ref forwarded, 1) != 0)
+                throw new InvalidOperationException("A Store loan permits one actual network handoff.");
+            await beforeForward!(ct).ConfigureAwait(false);
+        }
+        var pending = forward();
+        return await (networkWait is null || pending.IsCompleted ? pending : networkWait(pending, ct)).ConfigureAwait(false);
+    }
+
+    private void RequireLive() => ObjectDisposedException.ThrowIf(disposed, this);
+    internal void CloseForNetworkWait()
+    {
+        RequireLive(); held.RequireActive(); Dispose();
+    }
+    public void Dispose()
+    {
+        if (disposed) return; disposed = true;
+        lifetime.Cancel(); account = null; route = null; grant = null;
+    }
+    internal ValueTask RequireReturnCurrentAsync(CancellationToken ct) => networkWait is null
+        ? RequireCurrentAsync(ct) : new ValueTask(afterForward!(ct));
+
     internal async ValueTask RequireCurrentAsync(CancellationToken ct)
     {
-        ct.ThrowIfCancellationRequested(); held.RequireActive();
+        RequireLive(); ct.ThrowIfCancellationRequested(); held.RequireActive();
         var elapsed = Stopwatch.GetElapsedTime(started);
         if (elapsed < TimeSpan.Zero || elapsed >= TimeSpan.FromSeconds(30))
             throw new CryptographicException("Held mailbox transport exceeded its one-attempt loan.");
         // These are source-owned readonly existing-floor readers, not the fetch
         // gate or account APIs which would reacquire the lock already held here.
         var reading = await Source.RecheckEndpointPairUnderLeaseAsync(fresh, fresh.Proof, held, ct).ConfigureAwait(false);
-        _ = DeepIdV2AccountService.RequireOwnCurrentDirectory(account, fresh.Proof, reading.BootId.Span, reading.SampleSeconds);
+        _ = DeepIdV2AccountService.RequireOwnCurrentDirectory(account!, fresh.Proof, reading.BootId.Span, reading.SampleSeconds);
         if (retainedRead is not null)
         {
             var host = await MailboxHostAuthorityV2Verifier.VerifyPolicyAsync(fresh.Network, fresh.Authority,
@@ -88,7 +133,7 @@ internal sealed class Did2OwnedMailboxTransportContext : IMailboxPrivacyNetworkA
     public async ValueTask<VerifiedOnionNetworkContext> GetCurrentForMailboxAsync(
         ReadOnlyMemory<byte> placementCommitment, CancellationToken ct)
     {
-        ct.ThrowIfCancellationRequested();
+        RequireLive(); ct.ThrowIfCancellationRequested();
         if (placementCommitment.Length != 32)
             throw new CryptographicException("Held mailbox path requires its exact placement commitment.");
         var exact = placementCommitment.ToArray();

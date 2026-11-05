@@ -66,6 +66,8 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             // carriage/PMA does not erase the signed namespace of earlier routes.
             // Fault/issuer-substitution fixtures deliberately supply only their
             // hostile candidate; an old valid policy must not hide that fault.
+            if (storeWaitRetainPolicyHistory && mailboxPolicyFault == 0 && rotatedIssuerPma is not null)
+                return [operational.ExactPma2, exact];
             if (mailboxPolicyFault != 0 || rotatedIssuerPma is not null)
                 return mailboxPolicyFault == 3 ? [exact, exact.ToArray()] : [exact];
             return successor is not null && !operational.ExactPma2.Span.SequenceEqual(exact)

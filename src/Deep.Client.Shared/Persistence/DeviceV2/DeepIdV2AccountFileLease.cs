@@ -22,6 +22,7 @@ internal sealed class DeepIdV2AccountFileLease
     }
 
     internal string ExactPath => path;
+    internal HeldDeepIdV2AccountLease? TryAcquire() => HeldDeepIdV2AccountLease.TryAcquire(this);
     internal ValueTask<HeldDeepIdV2AccountLease> AcquireAsync(CancellationToken cancellationToken) =>
         HeldDeepIdV2AccountLease.AcquireAsync(this, cancellationToken);
 }
@@ -37,6 +38,13 @@ internal sealed class HeldDeepIdV2AccountLease : IDisposable
     private int readers;
     private HeldDeepIdV2AccountLease(string path, FileStream stream)
     { this.path = path; this.stream = stream; }
+
+    internal static HeldDeepIdV2AccountLease? TryAcquire(DeepIdV2AccountFileLease owner)
+    {
+        try { return new(owner.ExactPath, new FileStream(owner.ExactPath, FileMode.OpenOrCreate,
+            FileAccess.ReadWrite, FileShare.None, 1, FileOptions.Asynchronous)); }
+        catch (IOException) { return null; }
+    }
 
     internal static async ValueTask<HeldDeepIdV2AccountLease> AcquireAsync(
         DeepIdV2AccountFileLease owner, CancellationToken cancellationToken)
@@ -64,6 +72,33 @@ internal sealed class HeldDeepIdV2AccountLease : IDisposable
                     "The V2 account mutation lease did not become available.",
                     exception);
             }
+        }
+    }
+
+    // Only a network wait may suspend ownership. No borrowed read is allowed
+    // to retain the file while another account operation enters.
+    internal void SuspendForNetworkWait()
+    {
+        lock (gate)
+        {
+            RequireActive();
+            if (readers != 0) throw new InvalidOperationException("An account read borrow crossed network handoff.");
+            stream!.Dispose(); stream = null;
+        }
+    }
+    internal async Task RejoinAfterNetworkWaitAsync(CancellationToken ct)
+    {
+        lock (gate)
+        {
+            ObjectDisposedException.ThrowIf(disposed, this);
+            if (stream is not null) throw new InvalidOperationException("Account lease is already held.");
+        }
+        using var acquired = await AcquireAsync(new DeepIdV2AccountFileLease(path), ct).ConfigureAwait(false);
+        lock (gate)
+        {
+            ObjectDisposedException.ThrowIf(disposed, this);
+            if (stream is not null) throw new InvalidOperationException("Account lease rejoined twice.");
+            stream = acquired.stream; acquired.stream = null;
         }
     }
 

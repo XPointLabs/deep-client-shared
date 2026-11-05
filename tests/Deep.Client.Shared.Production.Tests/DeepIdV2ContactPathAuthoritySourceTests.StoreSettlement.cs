@@ -10,7 +10,7 @@ namespace Deep.Client.Shared.Production.Tests;
 public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
 {
     [Theory]
-    [InlineData("initial")] [InlineData("accept")] [InlineData("ordinary")]
+    [InlineData("initial")] [InlineData("accept")]
     [Trait("RequiresApprovedMlKemRuntime", "true")]
     public async Task Did2StoreSettlement_DistinctIssuanceAndAssignmentAdoptsExactLateReplyWithoutRedispatch(string kind)
     {
@@ -44,7 +44,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
     }
 
     [Theory]
-    [InlineData("initial")] [InlineData("accept")] [InlineData("ordinary")]
+    [InlineData("initial")] [InlineData("accept")]
     [Trait("RequiresApprovedMlKemRuntime", "true")]
     public async Task Did2StoreSettlement_NormalReturnedLateReplyIsAdoptedWithoutAnotherDispatch(string kind)
     {

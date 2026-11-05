@@ -369,13 +369,13 @@ public sealed class ClientMailboxAdapter
 
     private readonly ClientMailboxActivation activation;
     private readonly IClientMailboxBinaryIngress ingress;
-    private readonly ITransportOutboxRepository outbox;
-    private readonly IClientMailboxStateRepository state;
-    private readonly ITerminalRetrieveRetirementRepository terminalRetrieveRetirement;
+    private ITransportOutboxRepository outbox;
+    private IClientMailboxStateRepository state;
+    private ITerminalRetrieveRetirementRepository terminalRetrieveRetirement;
     private readonly IClientMailboxReceiptVerifier receipts;
-    private readonly MailboxAuthenticatedRequestFactory requests;
+    private MailboxAuthenticatedRequestFactory requests;
     private readonly IMailboxClientDecodePolicyProvider decodePolicies;
-    private readonly TimeProvider timeProvider;
+    private TimeProvider timeProvider;
 
 #if DEEP_CLEAN_PRODUCTION
     internal ClientMailboxAdapter(
@@ -450,6 +450,19 @@ public sealed class ClientMailboxAdapter
             throw new InvalidOperationException(
                 "Native mailbox preparation must share the SQLite local-state transaction.");
         }
+    }
+#endif
+
+#if DEEP_CLEAN_PRODUCTION
+    // Owner-only continuation of an already prepared Store. The old repository
+    // has been disposed; no SQL/key loan crosses the actual network wait.
+    internal void RejoinOwnedStore(SqliteDeepMailboxStore store,
+        MailboxAuthenticatedRequestFactory factory,
+        Deep.Client.Shared.Persistence.DeviceV2.HeldDeepIdV2AccountLease held, TimeProvider clock)
+    {
+        held.RequireActive();
+        if (!factory.Uses(store)) throw new InvalidOperationException("Store rejoin changed the transaction owner.");
+        outbox = store; state = store; terminalRetrieveRetirement = store; requests = factory; timeProvider = clock;
     }
 #endif
 

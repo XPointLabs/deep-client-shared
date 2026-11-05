@@ -117,7 +117,9 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             Store = store; this.holder = holder; this.policy = policy; Authority = authority;
             Selector = selector; Route = route; Grant = grant; Signer = new ExactGrantSigner(this);
         }
-        internal SqliteDeepMailboxStore Store { get; }
+        internal SqliteDeepMailboxStore Store { get; private set; }
+        internal void CloseForNetworkWait() { policy.Dispose(); holder.Dispose(); Store.Dispose(); }
+        internal void RejoinStore(SqliteDeepMailboxStore store) { Store = store; }
         internal VerifiedOfficialMailboxAuthority Authority { get; }
         internal MailboxCredentialSelector Selector { get; }
         internal ScopedMailboxResolvedRoute Route { get; }
@@ -168,12 +170,13 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
     private sealed class MailboxInstallationPolicy : IOwnedMailboxInstallationPolicy
     {
         private readonly HeldDeepIdV2AccountLease held;
-        private readonly VerifiedDeepIdV2MailboxRouteClosure route;
+        private VerifiedDeepIdV2MailboxRouteClosure? route;
         private readonly VerifiedMailboxAuthorityV2 policy;
         private readonly MailboxAuthenticatedGrant grant;
         private readonly DeepIdV2ContactRouteTimeWindow sample;
         private readonly long started;
         private readonly ulong minimumPreparedUpper;
+        internal ulong ExpiresAtUnixSeconds { get; }
         private bool disposed;
 
         internal MailboxInstallationPolicy(HeldDeepIdV2AccountLease held,
@@ -183,6 +186,11 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         {
             this.held = held; this.route = route; this.policy = policy; this.grant = grant;
             this.sample = sample; this.started = started; this.minimumPreparedUpper = minimumPreparedUpper; Clock = new InstallationClock(this);
+            ExpiresAtUnixSeconds = new[] { grant.ExpiresAtUnixSeconds, policy.ExpiresAtUnixSeconds,
+                route.Network.MaximumRecordExpiryUnixSeconds,
+                U64(route.Route.Reachability.Field(17).Span), U64(route.Route.Authorization.Field(13).Span),
+                U64(route.Route.Route.Field(18).Span), U64(route.Route.Successor.Field(11).Span),
+                U64(route.Route.Selection.Field(9).Span) }.Min();
             ValidateFreshness();
         }
 
@@ -190,7 +198,9 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
 
         private ulong CurrentUpper()
         {
-            ObjectDisposedException.ThrowIf(disposed, this); held.RequireActive(); route.Network.EnsureCurrent();
+            ObjectDisposedException.ThrowIf(disposed, this); held.RequireActive();
+            var activeRoute = route ?? throw new ObjectDisposedException(nameof(MailboxInstallationPolicy));
+            activeRoute.Network.EnsureCurrent();
             var elapsed = Stopwatch.GetElapsedTime(started);
             // An independently sampled conservative upper bound can be lower
             // than preparation's elapsed upper bound. Dispatch must not rewind
@@ -201,14 +211,9 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             // Both bounds age with this scope: a constant preparation floor
             // would pause its clock until a lower fresh sample caught up.
             var upper = MailboxInstallationUpperAtElapsed(sample.UpperUnixSeconds, minimumPreparedUpper, elapsed);
-            var expiry = new[] { grant.ExpiresAtUnixSeconds, policy.ExpiresAtUnixSeconds,
-                route.Network.MaximumRecordExpiryUnixSeconds,
-                U64(route.Route.Reachability.Field(17).Span), U64(route.Route.Authorization.Field(13).Span),
-                U64(route.Route.Route.Field(18).Span), U64(route.Route.Successor.Field(11).Span),
-                U64(route.Route.Selection.Field(9).Span) }.Min();
             if (sample.LowerUnixSeconds > sample.UpperUnixSeconds ||
                 sample.LowerUnixSeconds < grant.NotBeforeUnixSeconds ||
-                sample.LowerUnixSeconds < policy.NotBeforeUnixSeconds || upper >= expiry)
+                sample.LowerUnixSeconds < policy.NotBeforeUnixSeconds || upper >= ExpiresAtUnixSeconds)
                 throw new CryptographicException("Owned mailbox installation does not cover its full authenticated interval.");
             return upper;
         }
@@ -224,7 +229,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 !FixedRoute(query.MembershipCommitment.Span, grant.MembershipCommitment.Span);
         }
 
-        public void Dispose() => disposed = true;
+        public void Dispose() { disposed = true; route = null; }
         private static ulong U64(ReadOnlySpan<byte> bytes) => BinaryPrimitives.ReadUInt64BigEndian(bytes);
         private sealed class InstallationClock(MailboxInstallationPolicy owner) : TimeProvider
         {

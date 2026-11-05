@@ -65,7 +65,7 @@ public static class ReachabilityMailboxHolderAuthority
             Epoch = BinaryPrimitives.ReadUInt64BigEndian(route.Selection.Field(4).Span);
             Domain = domain;
         }
-        internal Func<CancellationToken, Task> Recheck { get; }
+        internal Func<CancellationToken, Task> Recheck { get; private set; }
         internal byte[] NetworkId { get; }
         internal byte[] LocatorHash { get; }
         internal byte[] RoleCapability { get; }
@@ -103,7 +103,11 @@ public static class ReachabilityMailboxHolderAuthority
                 throw new CryptographicException("The holder role/capability differs from its DID2 route.");
             return new(route, locator.Span, capability.Span, domain);
         }
-        public void Dispose() => CryptographicOperations.ZeroMemory(RoleCapability);
+        public void Dispose()
+        {
+            CryptographicOperations.ZeroMemory(RoleCapability);
+            Recheck = static _ => Task.FromException(new ObjectDisposedException(nameof(BoundScope)));
+        }
     }
 
     public sealed class ReachabilityMailboxHolderSigner :

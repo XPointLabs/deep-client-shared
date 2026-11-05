@@ -523,6 +523,8 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                 return Math.Max(quorum.FirstReplica.DurableAtUnixSeconds, quorum.SecondReplica.DurableAtUnixSeconds);
             }
         }
+        internal Func<CancellationToken, Task>? NetworkWait;
+        internal bool CorruptNetworkReply;
         internal ulong Cursor = 1;
         internal bool LoseReply { get; set; }
         internal Action? OnLostReply;
@@ -584,7 +586,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             if (durableResponse is not null)
             {
                 if (LoseReply) { OnLostReply?.Invoke(); throw new IOException("Injected lost Store reply after exact request dispatch."); }
-                return durableResponse.ToArray();
+                return await ReturnAfterNetworkWait(ct);
             }
             var ids = route.Replicas; var crypto = new SodiumMailboxPeerReplicationCrypto();
             // A fixture node stamps its own actual signed-time clock, not the
@@ -614,8 +616,17 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             }, Bytes(32, (byte)firstMarker)));
             if (LoseReply) { OnLostReply?.Invoke(); throw new IOException("Injected lost Store reply after durable quorum creation."); }
             BeforeReturnedReply?.Invoke(grant.ExpiresAtUnixSeconds);
-            return durableResponse.ToArray();
+            return await ReturnAfterNetworkWait(ct);
         }
+        private Task<ReadOnlyMemory<byte>> ReturnAfterNetworkWait(CancellationToken ct) =>
+            NetworkWait is null ? Task.FromResult<ReadOnlyMemory<byte>>(durableResponse!.ToArray()) :
+            context!.ForwardStoreAsync(async () =>
+            {
+                await NetworkWait(ct);
+                var returned = durableResponse!.ToArray();
+                if (CorruptNetworkReply) returned[^1] ^= 1;
+                return returned;
+            }, ct);
         public Task<ReadOnlyMemory<byte>> StoreAsync(ReadOnlyMemory<byte> request, CancellationToken ct = default) => throw new InvalidOperationException();
         public Task<ReadOnlyMemory<byte>> RetrieveAsync(ReadOnlyMemory<byte> request, CancellationToken ct = default) => throw new InvalidOperationException();
         public Task<ReadOnlyMemory<byte>> AcknowledgeAsync(ReadOnlyMemory<byte> request, CancellationToken ct = default) => throw new InvalidOperationException();

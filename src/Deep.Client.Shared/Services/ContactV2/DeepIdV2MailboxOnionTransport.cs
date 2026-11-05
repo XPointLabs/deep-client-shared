@@ -38,6 +38,15 @@ internal sealed class DeepIdV2MailboxOnionTransport :
             new OnionKeyAgreementAuthority(new NoClientReceiveVault()));
     }
 
+#if DEEP_TEST_INTERNALS
+    private Func<VerifiedOnionEntryTransport, IPrivacyManagedIngressTransport>? fixtureTransport;
+    internal DeepIdV2MailboxOnionTransport(Did2OwnedMailboxTransportContext dispatch,
+        PrivacyMailboxRouteSelection selection, IMailboxClientDecodePolicyProvider decodePolicies,
+        Func<VerifiedOnionEntryTransport, IPrivacyManagedIngressTransport> fixtureTransport)
+        : this(dispatch, selection, decodePolicies)
+    { this.fixtureTransport = fixtureTransport ?? throw new ArgumentNullException(nameof(fixtureTransport)); }
+#endif
+
     public Task<ReadOnlyMemory<byte>> StoreAsync(ReadOnlyMemory<byte> request, CancellationToken ct = default) => Unscoped(ct);
     public Task<ReadOnlyMemory<byte>> RetrieveAsync(ReadOnlyMemory<byte> request, CancellationToken ct = default) => Unscoped(ct);
     public Task<ReadOnlyMemory<byte>> AcknowledgeAsync(ReadOnlyMemory<byte> request, CancellationToken ct = default) => Unscoped(ct);
@@ -69,10 +78,16 @@ internal sealed class DeepIdV2MailboxOnionTransport :
             _ = PrivacyRoutedMailboxBinaryIngress.ValidateCanonicalMau3(exact, mailboxOperation);
             var attempt = await paths.PrepareOnRouteAsync(operation, exact, route, ct).ConfigureAwait(false);
             var entry = OnionEntryTransportFactory.Create(attempt.Path);
+#if DEEP_TEST_INTERNALS
+            using var transport = fixtureTransport?.Invoke(entry) ?? new PrivacyManagedIngressHttpTransport(entry);
+#else
             using var transport = new PrivacyManagedIngressHttpTransport(entry);
+#endif
             using var built = await codec.BuildAsync(attempt.Path, attempt.Request, ct).ConfigureAwait(false);
             if (heldDispatch is not null) await heldDispatch.RequireCurrentAsync(ct).ConfigureAwait(false);
-            var response = await transport.ForwardAsync(built.Frame, ct).ConfigureAwait(false);
+            var response = heldDispatch is not null && operation == OnionOperation.Store
+                ? await heldDispatch.ForwardStoreAsync(() => transport.ForwardAsync(built.Frame, ct), ct).ConfigureAwait(false)
+                : await transport.ForwardAsync(built.Frame, ct).ConfigureAwait(false);
             PrivacyRoutingOpenedResponse opened;
             try { opened = await codec.OpenResponseAsync(response, built.ReplyContext, ct).ConfigureAwait(false); }
             catch (Exception error) when (error is CryptographicException or OnionBoundaryException or OperationCanceledException)
@@ -89,7 +104,7 @@ internal sealed class DeepIdV2MailboxOnionTransport :
             {
                 PrivacyRoutedMailboxBinaryIngress.ValidateCanonicalResponse(opened.Result.Body.Span, operation, decodePolicies);
                 entry.EnsureCurrent();
-                if (heldDispatch is not null) await heldDispatch.RequireCurrentAsync(ct).ConfigureAwait(false);
+                if (heldDispatch is not null) await heldDispatch.RequireReturnCurrentAsync(ct).ConfigureAwait(false);
             }
             catch (Exception error) when (error is OnionBoundaryException or CryptographicException or
                 InvalidOperationException or IOException or OperationCanceledException)
