@@ -43,6 +43,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                     var exact = selected.Select(entry => ContactCodec.Decode("XMC2", ProtectedDid2MailboxGrantJournal.Response(entry).Span).Field(8)).ToArray();
                     using var publicationRaw = await storage.ReadOwnedAsync(ProtectedDid2ContactRouteJournal.Slot, ct).ConfigureAwait(false) ?? throw new InvalidDataException();
                     using var publications = publicationRaw.Use(bytes => ProtectedDid2ContactRouteJournal.Decode(bytes, networkId, account.Span, instance.Span));
+                    await HydratePublicationArchiveAsync(publications, publicationRaw, account, instance, ct, selectedRoute: plan.SqlSelector.ToArray()).ConfigureAwait(false);
                     var route = ContactRouteClosureCodec.Decode(RequireArchivedPath(publications, plan.SqlSelector).Value.Record(6).Span);
                     var scope = ArchivedPathReadScope(route);
                     using var readRaw = await storage.ReadOwnedAsync(ProtectedDid2MailboxReadJournal.Slot, ct).ConfigureAwait(false) ?? throw new InvalidDataException();
@@ -143,12 +144,14 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         if (index == 8)
         {
             using var publications = original.Use(bytes => ProtectedDid2ContactRouteJournal.Decode(bytes, networkId, account.Span, instance.Span));
+            await HydratePublicationArchiveAsync(publications, original, account, instance, ct, selectedRoute: plan.SqlSelector.ToArray()).ConfigureAwait(false);
             return RemoveArchivedPublication(publications, rows[^1], networkId, account.Span, instance.Span);
         }
         using var publicationRaw = await storage.ReadOwnedAsync(ProtectedDid2ContactRouteJournal.Slot, ct).ConfigureAwait(false) ?? throw new InvalidDataException();
         if (!publicationRaw.Use(bytes => FixedRoute(SHA256.HashData(bytes), plan.ReadRoot(8).Before.Span)))
             throw new CryptographicException("Read adoption lost its original publication predecessor.");
         using var archive = publicationRaw.Use(bytes => ProtectedDid2ContactRouteJournal.Decode(bytes, networkId, account.Span, instance.Span));
+        await HydratePublicationArchiveAsync(archive, publicationRaw, account, instance, ct, selectedRoute: plan.SqlSelector.ToArray()).ConfigureAwait(false);
         var entry = RequireArchivedPath(archive, plan.SqlSelector).Value;
         if (!FixedRoute(SHA256.HashData(entry.Exact), rows[^1].Commitment.Span)) throw new CryptographicException("Read adoption changed the original archive.");
         var route = ContactRouteClosureCodec.Decode(entry.Record(6).Span);

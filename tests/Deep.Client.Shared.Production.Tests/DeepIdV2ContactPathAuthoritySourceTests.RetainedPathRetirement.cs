@@ -101,7 +101,9 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
     private sealed partial class Fixture
     {
         internal async Task CheckArchivedReadPathAsync(bool nonempty, int handover, bool cancel = false, bool beforeHorizonOnly = false,
-            bool hostileSql = false, bool hostileRecovery = false, bool hostileProtected = false, bool automaticMaintenance = false)
+            bool hostileSql = false, bool hostileRecovery = false, bool hostileProtected = false, bool automaticMaintenance = false,
+            bool archivePublication = false, int archiveErasureHandover = -1, bool archiveErasureGuard = false,
+            bool archiveMissingTraversal = false)
         {
             await SeedShortPermanentProposalAsync(validitySeconds: 800);
             // This test creates and delivers a real native contact before
@@ -146,6 +148,17 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
             Assert.Equal(nonempty ? 1 : 0, synchronized.ProcessedEnvelopes);
             Assert.Equal(nonempty, synchronized.HasMore);
             await RenewNativeSenderPublicationPastExpiryAsync();
+            string? exactArchiveSlot = null;
+            if (archivePublication)
+            {
+                var enrolled = await accounts.EnrollPublicationArchiveAsync(); Assert.Equal(1, enrolled.ArchivedEntries);
+                using var publications = await RouteState();
+                var archived = publications.Archived.Single();
+                using var generation = await storage.ReadOwnedAsync("deep.store.v2.sql-generation") ?? throw new InvalidDataException();
+                exactArchiveSlot = generation.Use(bytes => ProtectedDid2ContactRouteJournal.ArchiveSlot(bytes.Slice(56, 32), archived.Key));
+                using var exactOriginal = await storage.ReadOwnedAsync(exactArchiveSlot); Assert.NotNull(exactOriginal);
+                Assert.True(archived.Value.Route.AsSpan().SequenceEqual(original.Route.ExactHash.Span));
+            }
             byte[] acquisition;
             using (var grants = await ReadPeerGrantsAsync(own: true))
             {
@@ -182,6 +195,8 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                     CryptographicOperations.ZeroMemory(originalHolder);
                 }
                 using var publications = await RouteState(); Assert.Equal(2, publications.Entries.Count);
+                if (exactArchiveSlot is not null)
+                { using var preserved = await storage.ReadOwnedAsync(exactArchiveSlot); Assert.NotNull(preserved); Assert.False(publications.Archived.Single().Value.Retiring); }
                 using var retained = await ReadPeerGrantsAsync(own: true); Assert.True(retained.Entries.ContainsKey(Convert.ToHexString(acquisition)));
                 Assert.Equal(1, issuer.Calls); Assert.Equal(1, terminal.RetrieveCalls);
                 CryptographicOperations.ZeroMemory(acquisition); return;
@@ -237,20 +252,70 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                 }
             }
             using var cancellation = new CancellationTokenSource();
-            var adoptions = 0; var hit = false;
+            var adoptions = 0; var hit = false; var erasureHit = false;
+            byte[] erasureGuardBefore = [], erasureGuardChanged = [];
             using (Did2CompactionTestHooks.Push(point =>
             {
+                if (archiveErasureGuard && point == Did2CompactionFailpoint.BeforePublicationArchiveDelete)
+                {
+                    using var before = storage.ReadOwnedAsync(ProtectedDid2ContactRouteJournal.Slot).GetAwaiter().GetResult() ?? throw new InvalidDataException();
+                    erasureGuardBefore = before.Use(bytes => bytes.ToArray()); erasureGuardChanged = erasureGuardBefore.ToArray();
+                    erasureGuardChanged[11] ^= 1;
+                    Assert.True(innerStorage.CompareExchangeAsync(ProtectedDid2ContactRouteJournal.Slot, erasureGuardBefore, erasureGuardChanged).GetAwaiter().GetResult());
+                    erasureHit = true; return;
+                }
+                var erasurePoints = new[] { Did2CompactionFailpoint.BeforePublicationArchiveDelete,
+                    Did2CompactionFailpoint.AfterPublicationArchiveDelete, Did2CompactionFailpoint.AfterPublicationArchiveReferenceRemoved };
+                if (archiveErasureHandover >= 0 && point == erasurePoints[archiveErasureHandover])
+                { erasureHit = true; throw new IOException("Injected exact publication archive erasure handover."); }
                 if (point == Did2CompactionFailpoint.AfterHistoryAdopted) adoptions++;
                 if (handover < 0 || point != points[handover] || handover is >= 3 and <= 5 && adoptions != handover - 2) return;
                 hit = true;
                 if (cancel) cancellation.Cancel(); else throw new IOException("Injected joint retained-path handover.");
             }))
             {
-                if (cancel) await Assert.ThrowsAnyAsync<OperationCanceledException>(() => Execute(cancellation.Token));
+                if (archiveErasureGuard) await Assert.ThrowsAsync<CryptographicException>(() => Execute(default));
+                else if (archiveErasureHandover >= 0) await Assert.ThrowsAsync<IOException>(() => Execute(default));
+                else if (cancel) await Assert.ThrowsAnyAsync<OperationCanceledException>(() => Execute(cancellation.Token));
                 else if (handover >= 0) await Assert.ThrowsAsync<IOException>(() => Execute(default));
                 else await Execute(default);
             }
             if (handover >= 0) Assert.True(hit);
+            if (archiveErasureHandover >= 0 || archiveErasureGuard) Assert.True(erasureHit);
+            if (exactArchiveSlot is not null && (archiveErasureHandover >= 0 || archiveErasureGuard))
+            {
+                using var originalReadback = await storage.ReadOwnedAsync(exactArchiveSlot);
+                Assert.Equal(archiveErasureGuard || archiveErasureHandover == 0, originalReadback is not null);
+            }
+            if (archiveErasureGuard)
+            {
+                Assert.True(await innerStorage.CompareExchangeAsync(ProtectedDid2ContactRouteJournal.Slot, erasureGuardChanged, erasureGuardBefore));
+                CryptographicOperations.ZeroMemory(erasureGuardBefore); CryptographicOperations.ZeroMemory(erasureGuardChanged);
+            }
+            if (archiveMissingTraversal)
+            {
+                using var generation = await storage.ReadOwnedAsync("deep.store.v2.sql-generation") ?? throw new InvalidDataException();
+                var instance = generation.Use(bytes => bytes.Slice(56, 32).ToArray());
+                using var rawRead = await storage.ReadOwnedAsync(ProtectedDid2MailboxReadJournal.Slot) ?? throw new InvalidDataException();
+                var beforeRead = rawRead.Use(bytes => bytes.ToArray()); byte[] changedRead = [];
+                var beforePublication = await RouteSnapshot();
+                try
+                {
+                    using var changed = ProtectedDid2MailboxReadJournal.Decode(beforeRead, Network, accountId, instance);
+                    changed.Traversals.Add(Convert.ToHexString(readScope.Value), new ClientMailboxTraversal(0, []));
+                    changed.Revision = checked(changed.Revision + 1);
+                    changedRead = ProtectedDid2MailboxReadJournal.Encode(changed, Network, accountId, instance);
+                    Assert.True(await innerStorage.CompareExchangeAsync(ProtectedDid2MailboxReadJournal.Slot, beforeRead, changedRead));
+                    ColdReopenCompactionStorage();
+                    var failure = await Assert.ThrowsAsync<CryptographicException>(() => SenderCompactionOwner().ResumeOwnedLocalCompactionAsync(default));
+                    Assert.Contains("traversal", failure.Message, StringComparison.Ordinal);
+                    Assert.Equal(beforePublication, await RouteSnapshot());
+                    using var stillErased = await storage.ReadOwnedAsync(exactArchiveSlot!); Assert.Null(stillErased);
+                    Assert.True(await innerStorage.CompareExchangeAsync(ProtectedDid2MailboxReadJournal.Slot, changedRead, beforeRead));
+                }
+                finally
+                { CryptographicOperations.ZeroMemory(instance); CryptographicOperations.ZeroMemory(beforeRead); CryptographicOperations.ZeroMemory(changedRead); CryptographicOperations.ZeroMemory(beforePublication); }
+            }
             ColdReopenCompactionStorage();
             var recovery = SenderCompactionOwner();
             var abandoned = cancel && handover == 0;
@@ -271,6 +336,13 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
                 await recovery.ResumeOwnedLocalCompactionAsync(default);
             }
             using (var idle = await storage.ReadOwnedAsync(Did2CompactionPlan.Slot) ?? throw new InvalidDataException()) Assert.Equal(0, idle.Use(bytes => bytes[1]));
+            if (exactArchiveSlot is not null && !abandoned)
+            {
+                using var erased = await storage.ReadOwnedAsync(exactArchiveSlot); Assert.Null(erased);
+                using var compactedPublications = await RouteState(); Assert.Empty(compactedPublications.Archived);
+                var capacity = await ReopenAccount().EnrollPublicationArchiveAsync();
+                Assert.Equal(0, capacity.ArchivedEntries); Assert.Equal(0, capacity.ArchivedBytes); Assert.True(capacity.CanReservePublication);
+            }
             using (var publications = await RouteState())
             {
                 Assert.Equal(abandoned ? 2 : 1, publications.Entries.Count);

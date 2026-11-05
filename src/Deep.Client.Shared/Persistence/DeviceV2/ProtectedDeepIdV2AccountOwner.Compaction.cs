@@ -206,6 +206,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 if (plan.Phase == 0)
                 {
                     await RequireNoPrefixPartsAsync(ct).ConfigureAwait(false);
+                    await DrainPublicationArchiveErasuresUnderLeaseAsync(owner.Account, owner.Instance, held, ct).ConfigureAwait(false);
                     if (completedPrefix is not null && completedScope is not null)
                     {
                         var finishedPlan = completedPrefix; var finishedScope = completedScope;

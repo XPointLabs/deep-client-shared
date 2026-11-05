@@ -199,6 +199,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             throw new InvalidDataException("Archived-path maintenance lost publication custody.");
         using var publications = publicationRaw.Use(bytes => ProtectedDid2ContactRouteJournal.Decode(bytes,
             networkId, current.AccountId.Span, instance.Span));
+        await HydratePublicationArchiveAsync(publications, publicationRaw, current.AccountId, instance, ct).ConfigureAwait(false);
         var main = Convert.ToHexString(CreatePermanentContactPlan(current, instance.Span).Intent.Span);
         if (!publications.Entries.TryGetValue(main, out var active) || active.Phase != 7 || active.Kind != 1 ||
             publications.Entries.Values.Any(entry => entry.Phase != 7)) return false;

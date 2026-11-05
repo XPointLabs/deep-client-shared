@@ -26,8 +26,9 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 using var publication = await owner.OpenOwnRetainedPublicationUnderLeaseAsync(current, held, source, fresh, ct, route.ExactHash).ConfigureAwait(false);
                 using var publicationRaw = await owner.storage.ReadOwnedAsync(ProtectedDid2ContactRouteJournal.Slot, ct).ConfigureAwait(false) ?? throw new InvalidDataException("Archived publication is absent.");
                 using var publications = publicationRaw.Use(bytes => ProtectedDid2ContactRouteJournal.Decode(bytes, owner.networkId, current.AccountId.Span, instance));
-                if (publications.Archived.Values.Any(reference => FixedRoute(reference.Route, route.ExactHash.Span)))
-                    throw new IOException("Exact publication archive retirement requires an archive-aware erasure owner; no effect was applied.");
+                await owner.HydratePublicationArchiveAsync(publications, publicationRaw, current.AccountId, instance, ct,
+                    selectedRoute: route.ExactHash).ConfigureAwait(false);
+                await owner.RequireNoSealedAcquisitionForPathAsync(grants, current.AccountId, instance, route.ExactHash, held, ct).ConfigureAwait(false);
                 var permanent = owner.CreatePermanentContactPlan(current, instance);
                 var main = Convert.ToHexString(permanent.Intent.Span);
                 if (!publications.Entries.TryGetValue(main, out var active) || active.Phase != 7 || active.Kind != 1 ||
@@ -248,9 +249,17 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         ReadOnlySpan<byte> network, ReadOnlySpan<byte> account, ReadOnlySpan<byte> instance)
     {
         var archive = RequireArchivedPath(state, row.Selector.Span);
-        if (row.Action != Did2CompactionPlan.Disposition.RetainedPath || !FixedRoute(SHA256.HashData(archive.Value.Exact), row.Commitment.Span) || state.Entries.Count < 2)
+        if (row.Action != Did2CompactionPlan.Disposition.RetainedPath || !FixedRoute(SHA256.HashData(archive.Value.Exact), row.Commitment.Span) ||
+            ProtectedDid2ContactRouteJournal.WorkingCount(state) + state.Archived.Count < 2)
             throw new CryptographicException("Archived-path publication changed or is the final route.");
-        state.Entries.Remove(archive.Key); archive.Value.Dispose();
+        if (state.Archived.TryGetValue(archive.Key, out var reference))
+        {
+            if (reference.Retiring) throw new CryptographicException("Publication erasure already has a stored tombstone.");
+            reference.ReadScope = ArchivedPathReadScope(ContactRouteClosureCodec.Decode(archive.Value.Record(6).Span)).Value.ToArray();
+            reference.Retiring = true;
+        }
+        state.Entries.Remove(archive.Key);
+        archive.Value.Dispose();
         return ProtectedDid2ContactRouteJournal.Encode(state, network, account, instance);
     }
 }

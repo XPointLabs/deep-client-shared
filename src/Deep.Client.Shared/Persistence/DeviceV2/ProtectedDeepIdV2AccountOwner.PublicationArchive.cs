@@ -17,6 +17,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         IReadOnlyList<DeepSecureStorageWrite> copies = [];
         try
         {
+            await DrainPublicationArchiveErasuresUnderLeaseAsync(current.AccountId, instance, held, ct).ConfigureAwait(false);
             using var root = await storage.ReadOwnedAsync(ProtectedDid2ContactRouteJournal.Slot, ct).ConfigureAwait(false) ??
                 throw new InvalidDataException("Publication enrollment source is absent.");
             expected = root.Use(bytes => bytes.ToArray());

@@ -38,6 +38,7 @@ public sealed class ProtectedDid2PublicationArchiveCodecTests
     [InlineData(1)]
     [InlineData(2)]
     [InlineData(3)]
+    [InlineData(4)]
     public void HostileArchiveReferenceFailsBeforeAnyArchiveRead(int mode)
     {
         var bytes = new byte[ProtectedDid2ContactRouteJournal.HeaderBytes + ProtectedDid2ContactRouteJournal.ArchiveReferenceBytes];
@@ -48,6 +49,7 @@ public sealed class ProtectedDid2PublicationArchiveCodecTests
         if (mode == 0) BinaryPrimitives.WriteUInt32BigEndian(row[96..], uint.MaxValue);
         if (mode == 1) row[100] = 1;
         if (mode == 2) row.Slice(32, 32).Clear();
+        if (mode == 4) row[100] = 3; // Erasure requires its exact scope trailer.
         // Mode3 is otherwise framed but cannot archive without a current working owner.
         Assert.Throws<InvalidDataException>(() => ProtectedDid2ContactRouteJournal.Decode(bytes, Network, Account, Instance));
     }

@@ -324,7 +324,7 @@ internal static partial class ProtectedDid2ContactRouteJournal
         Scope(network, account, instance);
         if (WorkingCount(state) + state.Archived.Count > MaximumIntents) throw new IOException("Protected route capacity is exhausted.");
         ValidateArchive(state);
-        var size = checked(HeaderBytes + state.Archived.Count * ArchiveReferenceBytes); var reserved = size; ulong revision = checked(1UL + (ulong)state.Archived.Count * 7);
+        var size = checked(HeaderBytes + state.Archived.Count * ArchiveReferenceBytes + ErasureScopeBytes(state)); var reserved = size; ulong revision = checked(1UL + (ulong)state.Archived.Count * 7);
         foreach (var pair in state.Entries.Where(pair => !state.Archived.ContainsKey(pair.Key)))
         {
             using var checkedEntry = Entry.Decode(pair.Value.Exact, network, account);
@@ -371,7 +371,8 @@ internal static partial class ProtectedDid2ContactRouteJournal
                 if (reserved > MaximumBytes) throw new InvalidDataException("Protected route reservation exceeds its byte capacity.");
             }
             ReadArchiveReferences(state, bytes[offset..], bytes[1]);
-            offset = bytes.Length;
+            reserved = checked(reserved + ErasureScopeBytes(state));
+            if (reserved > MaximumBytes) throw new InvalidDataException("Publication erasure exceeds its working reservation.");
             if (BinaryPrimitives.ReadUInt64BigEndian(bytes[4..]) != revision)
                 throw new InvalidDataException("Protected route revision/trailing bytes are noncanonical.");
             return state;
