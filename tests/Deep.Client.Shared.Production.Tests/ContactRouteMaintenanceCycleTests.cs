@@ -10,6 +10,68 @@ namespace Deep.Client.Shared.Production.Tests;
 // proofs, Store receipts, transport fixtures or connected E2E evidence.
 public sealed class ContactRouteMaintenanceCycleTests
 {
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task BackgroundPhaseOrderAdvancesBeforeRepeatedFailureAndPreservesTheActualRefusal(bool failingReceive)
+    {
+        var cursor = new DeepIdV2AccountService.ContactMaintenanceCursor();
+        var failure = new CryptographicException("Unit-only actual phase refusal.");
+        var trace = new List<string>();
+        for (var cycle = 0; cycle < 3; cycle++)
+        {
+            var actual = await Assert.ThrowsAsync<CryptographicException>(() =>
+                DeepIdV2AccountService.RunContactMaintenancePhasesAsync(cursor,
+                    _ => { trace.Add("receive"); return failingReceive ? Task.FromException<DeepIdV2MailboxSynchronizationResult>(failure) :
+                        Task.FromResult(new DeepIdV2MailboxSynchronizationResult(0, false, 0)); },
+                    _ => { trace.Add("advertise"); return !failingReceive ? Task.FromException<DeepIdV2ContactMaintenanceResult>(failure) :
+                        Task.FromResult(new DeepIdV2ContactMaintenanceResult(1, 1, 0, 0, 0, false)); }, default));
+            Assert.Same(failure, actual);
+        }
+        Assert.Equal(failingReceive ? new[] { "receive", "advertise", "receive", "receive" } :
+            new[] { "receive", "advertise", "advertise", "receive", "advertise" }, trace);
+    }
+
+    [Fact]
+    public async Task CancellationAfterFirstPhaseAdvancesBackgroundOrderWithoutInvokingItsSecondPhase()
+    {
+        var cursor = new DeepIdV2AccountService.ContactMaintenanceCursor(); var trace = new List<string>();
+        using var cancelled = new CancellationTokenSource();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => DeepIdV2AccountService.RunContactMaintenancePhasesAsync(cursor,
+            token => { Assert.Equal(cancelled.Token, token); trace.Add("receive"); cancelled.Cancel();
+                return Task.FromResult(new DeepIdV2MailboxSynchronizationResult(0, false, 0)); },
+            _ => { trace.Add("forbidden"); throw new InvalidOperationException(); }, cancelled.Token));
+        _ = await DeepIdV2AccountService.RunContactMaintenancePhasesAsync(cursor,
+            _ => { trace.Add("receive"); return Task.FromResult(new DeepIdV2MailboxSynchronizationResult(0, false, 0)); },
+            _ => { trace.Add("advertise"); return Task.FromResult(new DeepIdV2ContactMaintenanceResult(1, 0, 0, 0, 0, false)); }, default);
+        Assert.Equal(new[] { "receive", "advertise", "receive" }, trace);
+    }
+
+    [Fact]
+    public async Task ExplicitForegroundCyclesKeepReceiveFirstAndPreserveBothOwnersExactResults()
+    {
+        var trace = new List<string>();
+        for (var cycle = 0; cycle < 2; cycle++)
+        {
+            var result = await DeepIdV2AccountService.RunContactMaintenancePhasesAsync(null,
+                _ => { trace.Add("receive"); return Task.FromResult(new DeepIdV2MailboxSynchronizationResult(2, true, 1)); },
+                _ => { trace.Add("advertise"); return Task.FromResult(new DeepIdV2ContactMaintenanceResult(1, 1, 0, 0, 0, false)); }, default);
+            Assert.Equal(new DeepIdV2ContactMaintenanceResult(1, 1, 0, 2, 1, true), result);
+        }
+        Assert.Equal(new[] { "receive", "advertise", "receive", "advertise" }, trace);
+    }
+
+    [Fact]
+    public async Task AlreadyCancelledCycleInvokesNoPhaseAndDoesNotConsumeTheNextBackgroundOrder()
+    {
+        var cursor = new DeepIdV2AccountService.ContactMaintenanceCursor(); var calls = 0;
+        using var cancelled = new CancellationTokenSource(); cancelled.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => DeepIdV2AccountService.RunContactMaintenancePhasesAsync(cursor,
+            _ => { calls++; throw new InvalidOperationException(); },
+            _ => { calls++; throw new InvalidOperationException(); }, cancelled.Token));
+        Assert.Equal(0, calls); Assert.True(cursor.TakeReceiveFirst());
+    }
+
     [Fact]
     public void BackgroundCursorPrioritizesRetainedDescriptorsWithoutStarvingUnknownAcceptedScopes()
     {

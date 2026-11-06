@@ -242,6 +242,12 @@ public sealed partial class DeepIdV2AccountService
                         }
                         finally { accountOperations.Release(); }
                     }
+                    // ReadGroupBatch authenticated this exact original against
+                    // its native send. Atomic queues and cold resumes already
+                    // committed it, so RunMessaging emits no new transition.
+                    // Every private owner/materialization scope is closed here.
+                    if (item.NativeCommitted)
+                        ClientDeliveryEvents.Reached(ClientDeliveryPhase.NativeOutboxDurable, item.Event);
                     var stored = await DeliverOwnMessagingAsync(conversation.Scope, item.Operation, source, ct).ConfigureAwait(false);
                     if (stored.IngressDispatched) ClientDeliveryEvents.Reached(ClientDeliveryPhase.StoreQuorum, item.Event);
                 }

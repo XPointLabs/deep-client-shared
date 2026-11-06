@@ -16,11 +16,16 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         DeepIdV2ContactPathAuthoritySource.OwnPreKeyAuthoringAuthority own,
         VerifiedDeepIdV2DirectoryFreshness peer, DeepIdV2ContactPathAuthoritySource source, CancellationToken ct)
     {
+        ClientDeliveryEvents.Initialize();
+        var observations = new List<ClientDeliveryObservation>();
         var nativeWork = Did2MessagingSqlJournal.NativeWork.BeginOperation();
         try
         {
-            return await PrepareDirectAuthoredAsync(trustedUnixSeconds, verifier, scope, operation, text, ReadOnlyMemory<byte>.Empty,
-                own, peer, source, ct, atomicQueue: true).ConfigureAwait(false);
+            var result = await PrepareDirectAuthoredAsync(trustedUnixSeconds, verifier, scope, operation, text, ReadOnlyMemory<byte>.Empty,
+                own, peer, source, ct, atomicQueue: true, deliveryObservations: observations).ConfigureAwait(false);
+            // The core has released every private lease and storage scope.
+            foreach (var observation in observations) ClientDeliveryEvents.Publish(observation);
+            return result;
         }
         finally
         {
@@ -78,7 +83,8 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         VerifiedDeepIdV2DirectoryFreshness peer, DeepIdV2ContactPathAuthoritySource source, CancellationToken ct, bool routeUpdate = false,
         OwnedRouteHistoryCommand historyCommand = OwnedRouteHistoryCommand.Announcement,
         ReadOnlyMemory<byte> historySelectionOperation = default,
-        RouteHistoryPreparation historyPreparation = RouteHistoryPreparation.DurableStaging, bool atomicQueue = false)
+        RouteHistoryPreparation historyPreparation = RouteHistoryPreparation.DurableStaging, bool atomicQueue = false,
+        List<ClientDeliveryObservation>? deliveryObservations = null)
     {
         ArgumentNullException.ThrowIfNull(scope);
         if (operation is { } retryOperation) ProtectedDph2PreClaimJournal.RequireIntent(retryOperation.Span);
@@ -271,6 +277,8 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                     var stable = await opened.Custody.ReconcileAsync(ct).ConfigureAwait(false);
                     using var handoff = await AuthenticatedDirectDmc2.FromOwnedDid2CommitAsync(opened, stable, op, exact, ct).ConfigureAwait(false);
                     RequireApplicationDisposition(await application.MaterializeDirectDmc2Async(handoff, ct).ConfigureAwait(false));
+                    if (ClientDeliveryEvents.Capture(ClientDeliveryPhase.NativeOutboxDurable,
+                        ApplicationCoreCodec.DecodeDmc2(exact)) is { } observation) deliveryObservations?.Add(observation);
                 }
             }
             finally { CryptographicOperations.ZeroMemory(exact); }

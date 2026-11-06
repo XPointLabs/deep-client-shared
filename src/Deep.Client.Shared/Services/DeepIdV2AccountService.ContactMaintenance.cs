@@ -21,6 +21,11 @@ public sealed partial class DeepIdV2AccountService
     internal sealed class ContactMaintenanceCursor
     {
         private int nextKnown, nextUnknown, knownStreak;
+        private bool receiveNext = true;
+        internal bool TakeReceiveFirst()
+        {
+            var selected = receiveNext; receiveNext = !receiveNext; return selected;
+        }
         internal IReadOnlyList<DeepIdV2ConversationSnapshot> Select(IReadOnlyList<DeepIdV2ConversationSnapshot> contacts,
             IReadOnlyDictionary<string, DeepPermanentIdV2>? knownAddresses = null)
         {
@@ -96,9 +101,36 @@ public sealed partial class DeepIdV2AccountService
         // Once per cycle, not once per contact. The producer independently
         // authenticates all signed refresh windows and resumes exact pending work.
         _ = await EnsureOwnPermanentContactPublishedAsync(source, ct).ConfigureAwait(false);
-        var page = cursor is null ? await SynchronizeOwnMailboxAsync(source, ct).ConfigureAwait(false) :
-            await ReceiveContactMaintenanceMailboxPageAsync(source, ct).ConfigureAwait(false);
-        var result = await AdvertisePublishedContactRoutesAsync(source, addresses, ct, cursor).ConfigureAwait(false);
+        return await RunContactMaintenancePhasesAsync(cursor,
+            token => cursor is null ? SynchronizeOwnMailboxAsync(source, token) :
+                ReceiveContactMaintenanceMailboxPageAsync(source, token),
+            token => AdvertisePublishedContactRoutesAsync(source, addresses, token, cursor), ct).ConfigureAwait(false);
+    }
+
+    // Scheduling only, after the same own-publication/current-authority
+    // prerequisites. Alternate before any phase callback so a failed receive
+    // or outgoing effect cannot suppress every later opposite-phase opportunity.
+    // No refusal is caught or converted to success; each owner keeps its exact
+    // pending work, independent authority/ACK checks and original cancellation.
+    internal static async Task<DeepIdV2ContactMaintenanceResult> RunContactMaintenancePhasesAsync(
+        ContactMaintenanceCursor? cursor,
+        Func<CancellationToken, Task<DeepIdV2MailboxSynchronizationResult>> receive,
+        Func<CancellationToken, Task<DeepIdV2ContactMaintenanceResult>> advertise, CancellationToken ct)
+    {
+        ArgumentNullException.ThrowIfNull(receive); ArgumentNullException.ThrowIfNull(advertise);
+        ct.ThrowIfCancellationRequested();
+        var receiveFirst = cursor?.TakeReceiveFirst() ?? true;
+        DeepIdV2MailboxSynchronizationResult page; DeepIdV2ContactMaintenanceResult result;
+        if (receiveFirst)
+        {
+            page = await receive(ct).ConfigureAwait(false); ct.ThrowIfCancellationRequested();
+            result = await advertise(ct).ConfigureAwait(false);
+        }
+        else
+        {
+            result = await advertise(ct).ConfigureAwait(false); ct.ThrowIfCancellationRequested();
+            page = await receive(ct).ConfigureAwait(false);
+        }
         ct.ThrowIfCancellationRequested();
         return result with { ProcessedEnvelopes = page.ProcessedEnvelopes,
             DurableTombstones = page.DurableTombstones, HasMore = page.HasMore };
