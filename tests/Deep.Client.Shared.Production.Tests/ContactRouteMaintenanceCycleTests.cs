@@ -11,6 +11,45 @@ namespace Deep.Client.Shared.Production.Tests;
 public sealed class ContactRouteMaintenanceCycleTests
 {
     [Fact]
+    public void BackgroundCursorPrioritizesRetainedDescriptorsWithoutStarvingUnknownAcceptedScopes()
+    {
+        var contacts = Enumerable.Range(1, 4).Select(index => Contact((byte)index,
+            DeepIdV2ContactState.PeerAcceptanceRetained)).ToArray();
+        var known = DeepIdV2AccountService.CopyKnownContactAddresses(new Dictionary<string, DeepPermanentIdV2>
+            { [contacts[0].Conversation.ConversationId] = KnownAddress(), [contacts[1].Conversation.ConversationId] = KnownAddress() });
+        var cursor = new DeepIdV2AccountService.ContactMaintenanceCursor();
+        var knownVisits = new List<string>(); var unknownVisits = new List<string>();
+        for (var cycle = 0; cycle < 12; cycle++)
+        {
+            var selected = Assert.Single(cursor.Select(contacts, known));
+            var isKnown = known.ContainsKey(selected.Conversation.ConversationId);
+            Assert.Equal(cycle % 4 != 3, isKnown);
+            (isKnown ? knownVisits : unknownVisits).Add(Convert.ToHexString(selected.Conversation.Scope.Hash));
+        }
+        Assert.Equal(2, knownVisits.Distinct().Count()); Assert.Equal(2, unknownVisits.Distinct().Count());
+        Assert.All(knownVisits.Zip(knownVisits.Skip(1)), pair => Assert.NotEqual(pair.First, pair.Second));
+        Assert.NotEqual(unknownVisits[0], unknownVisits[1]);
+    }
+
+    [Fact]
+    public void DescriptorPriorityKeepsDistinctAcceptedDeviceScopesAndNeverPromotesPendingConsent()
+    {
+        var first = Contact(1, DeepIdV2ContactState.PeerAcceptanceRetained);
+        var bytes = first.Conversation.Scope.Exact.ToArray(); bytes[172] ^= 1;
+        var second = new DeepIdV2ConversationSnapshot(new(Did2MessagingSessionScope.RestoreMetadata(bytes)), first.ContactState);
+        var pending = Contact(2, DeepIdV2ContactState.IncomingRequest);
+        var known = new Dictionary<string, DeepPermanentIdV2>
+            { [first.Conversation.ConversationId] = KnownAddress(), [pending.Conversation.ConversationId] = KnownAddress() };
+        var cursor = new DeepIdV2AccountService.ContactMaintenanceCursor(); var visited = new HashSet<string>();
+        for (var cycle = 0; cycle < 2; cycle++)
+        {
+            var selected = Assert.Single(cursor.Select([pending, first, second], known));
+            Assert.Equal(first.Conversation.ConversationId, selected.Conversation.ConversationId);
+            Assert.True(visited.Add(Convert.ToHexString(selected.Conversation.Scope.Hash)));
+        }
+    }
+
+    [Fact]
     public async Task BackgroundCursorAdvancesBeforePeerFailureAndVisitsAllAcceptedDeviceScopes()
     {
         var contacts = new[] { Contact(1, DeepIdV2ContactState.IncomingRequest),
@@ -173,6 +212,13 @@ public sealed class ContactRouteMaintenanceCycleTests
 
     private static DeepIdV2ConversationSnapshot[] Pair() =>
         [Contact(1, DeepIdV2ContactState.PeerAcceptanceRetained), Contact(2, DeepIdV2ContactState.LocalAcceptanceRetained)];
+
+    private static DeepPermanentIdV2 KnownAddress()
+    {
+        var capability = Enumerable.Repeat((byte)2, 16).ToArray();
+        return DeepPermanentIdV2.FromCredential(DeepIdV2Codec.AuthorDid2(Enumerable.Repeat((byte)1, 32).ToArray(),
+            Enumerable.Repeat((byte)3, 1952).ToArray(), capability), capability);
+    }
 
     private static DeepIdV2ConversationSnapshot Contact(byte selector, DeepIdV2ContactState state)
     {

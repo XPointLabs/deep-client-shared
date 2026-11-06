@@ -20,18 +20,32 @@ public sealed partial class DeepIdV2AccountService
     private readonly ContactMaintenanceCursor backgroundMaintenanceCursor = new();
     internal sealed class ContactMaintenanceCursor
     {
-        private int next;
-        internal IReadOnlyList<DeepIdV2ConversationSnapshot> Select(IReadOnlyList<DeepIdV2ConversationSnapshot> contacts)
+        private int nextKnown, nextUnknown, knownStreak;
+        internal IReadOnlyList<DeepIdV2ConversationSnapshot> Select(IReadOnlyList<DeepIdV2ConversationSnapshot> contacts,
+            IReadOnlyDictionary<string, DeepPermanentIdV2>? knownAddresses = null)
         {
             RequireContactMaintenanceMetadata(contacts);
             var accepted = contacts.Where(item => item.ContactState is DeepIdV2ContactState.LocalAcceptanceRetained or
                 DeepIdV2ContactState.PeerAcceptanceRetained).OrderBy(item => Convert.ToHexString(item.Conversation.Scope.Hash),
                     StringComparer.Ordinal).ToArray();
             if (accepted.Length == 0) return [];
-            var selected = accepted[next % accepted.Length];
-            // Advance before any peer callback so one offline/refused contact
-            // cannot consume every later background opportunity.
-            next = (next + 1) % accepted.Length;
+            var known = accepted.Where(item => knownAddresses?.ContainsKey(item.Conversation.ConversationId) == true).ToArray();
+            var unknown = accepted.Where(item => knownAddresses?.ContainsKey(item.Conversation.ConversationId) != true).ToArray();
+            DeepIdV2ConversationSnapshot selected;
+            // A retained descriptor is only a scheduling hint. Every effect
+            // still authenticates the actual peer, device, consent and route.
+            // Three known opportunities then one unknown preserve both lanes'
+            // bounded fairness; advance before any callback, including failure.
+            if (known.Length > 0 && (unknown.Length == 0 || knownStreak < 3))
+            {
+                selected = known[nextKnown % known.Length];
+                nextKnown = (nextKnown + 1) % known.Length; knownStreak = Math.Min(3, knownStreak + 1);
+            }
+            else
+            {
+                selected = unknown[nextUnknown % unknown.Length];
+                nextUnknown = (nextUnknown + 1) % unknown.Length; knownStreak = 0;
+            }
             return [selected];
         }
     }
@@ -95,7 +109,7 @@ public sealed partial class DeepIdV2AccountService
         ContactMaintenanceCursor? cursor = null)
     {
         var contacts = await ListConversationsAsync(ct).ConfigureAwait(false);
-        if (cursor is not null) contacts = cursor.Select(contacts);
+        if (cursor is not null) contacts = cursor.Select(contacts, addresses);
         var expiredDeferred = 0; var expiredReintroductions = 0;
         var result = await MaintainAcceptedContactRoutesAsync(contacts,
             (conversation, token) => ReadContactRouteHealthAsync(conversation, source, token),
