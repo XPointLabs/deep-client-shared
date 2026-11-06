@@ -35,7 +35,9 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         OwnedInitialMessagingSeed.RequireFreshScope(opened.Scope, resolved.Own.Proof, peer, first);
         var history = await ReadAuthenticatedPeerRouteHistoryUnderLeaseAsync(current, opened,
             resolved.Own, peer, source, held, ct).ConfigureAwait(false);
-        if (history.Faulted || !await history.HasConsent(ulong.MaxValue, ct).ConfigureAwait(false))
+        var rendezvous = await ReadPeerRendezvousTipUnderLeaseAsync(opened, history.InboundXur1,
+            resolved.Own, peer, source, held, ct).ConfigureAwait(false);
+        if (history.Faulted || rendezvous.Faulted || !await history.HasConsent(ulong.MaxValue, ct).ConfigureAwait(false))
             throw new CryptographicException("Re-introduction requires actual mutual native route-update consent and no route fault.");
         await AuthenticatedInitialDmc2Batch.RequireRetainedMailboxRouteFactsAsync(history.Original,
             peer, resolved.Own, source, held, ct).ConfigureAwait(false);

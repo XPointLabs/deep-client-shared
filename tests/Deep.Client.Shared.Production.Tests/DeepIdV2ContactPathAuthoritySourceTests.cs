@@ -3212,8 +3212,10 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         }
     }
 
-    private sealed class NetworkMarkerFaultStorage(IDeepSecureStorage inner) : IDeepSecureStorage, IDeepSecureStorageGuardedRead
+    private sealed class NetworkMarkerFaultStorage(IDeepSecureStorage inner) : IDeepSecureStorage, IDeepSecureStorageGuardedRead, IDeepSecureStorageAtomicMutation
     {
+        Task<bool> IDeepSecureStorageAtomicMutation.CompareExchangeBatchAsync(DeepSecureStorageAtomicMutation mutation, CancellationToken ct) =>
+            inner.CompareExchangeBatchAsync(mutation.Expected, mutation.Writes.Select(pair => new DeepSecureStorageWrite(pair.Key, pair.Value)).ToArray(), ct);
         internal int NetworkMarkerSingleReads { get; set; }
         internal bool TrackNetworkMarkerReads { get; set; }
         internal List<string[]> NetworkMarkerReadGroups { get; } = [];

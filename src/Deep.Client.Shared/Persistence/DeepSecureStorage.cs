@@ -279,11 +279,38 @@ public interface IDeepSecureStorage
     Task PurgeStoreV2NamespaceAsync(CancellationToken cancellationToken = default);
 }
 
-public sealed class InMemoryDeepSecureStorage : IDeepSecureStorage, IDeepSecureStorageGuardedRead, IDisposable
+public sealed class InMemoryDeepSecureStorage : IDeepSecureStorage, IDeepSecureStorageGuardedRead, IDeepSecureStorageAtomicMutation, IDisposable
 {
-    private readonly ConcurrentDictionary<string, byte[]> values = new(StringComparer.Ordinal);
+    private ConcurrentDictionary<string, byte[]> values = new(StringComparer.Ordinal);
     private readonly object gate = new();
     private int disposed;
+
+    Task<bool> IDeepSecureStorageAtomicMutation.CompareExchangeBatchAsync(DeepSecureStorageAtomicMutation mutation, CancellationToken ct)
+    {
+        lock (gate)
+        {
+            ThrowIfDisposed(); ct.ThrowIfCancellationRequested();
+            if (mutation.Expected.Any(pair => !values.TryGetValue(pair.Key, out var actual) ||
+                !CryptographicOperations.FixedTimeEquals(actual, pair.Value)) ||
+                mutation.Writes.Keys.Any(slot => !mutation.Expected.ContainsKey(slot) && values.ContainsKey(slot)))
+                return Task.FromResult(false);
+            DeepSecureStorageRegistration.ValidateInventoryLengths(values.Where(pair => !mutation.Writes.ContainsKey(pair.Key))
+                .Select(pair => new KeyValuePair<string, int>(pair.Key, pair.Value.Length))
+                .Concat(mutation.Writes.Select(pair => new KeyValuePair<string, int>(pair.Key, pair.Value.Length))));
+            var copies = mutation.CopyWrites();
+            ConcurrentDictionary<string, byte[]> successor;
+            try
+            {
+                successor = new(values.Where(pair => !copies.ContainsKey(pair.Key)).Concat(copies), StringComparer.Ordinal);
+                ct.ThrowIfCancellationRequested();
+            }
+            catch { foreach (var bytes in copies.Values) CryptographicOperations.ZeroMemory(bytes); throw; }
+            var previous = values; values = successor;
+            foreach (var slot in copies.Keys)
+                if (previous.TryGetValue(slot, out var old)) CryptographicOperations.ZeroMemory(old);
+            return Task.FromResult(true);
+        }
+    }
 
     Task<OwnedDeepSecretBatch> IDeepSecureStorageGuardedRead.ReadOwnedGuardedBatchAsync(
         DeepSecureStorageGuardedRead request, CancellationToken cancellationToken)

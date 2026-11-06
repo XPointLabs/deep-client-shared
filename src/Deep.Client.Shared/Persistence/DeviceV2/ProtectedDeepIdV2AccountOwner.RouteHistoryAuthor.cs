@@ -47,6 +47,10 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             throw new CryptographicException("Elective announcement changed its actual native predecessor.");
         if (head.Announcement.IsEmpty || !FixedRoute(head.ExactRoute.Span, publication.Route.ExactRouteClosure.Span)) return;
         var previous = ApplicationCoreCodec.DecodeDmc2(head.Announcement.Span);
+        if (draft.ParsedPayload is ContactRouteHistoryDmc2Payload { RendezvousSuccessors.Count: > 0 } renewal &&
+            renewal.RendezvousSuccessors.Count >
+                ((previous.ParsedPayload as ContactRouteHistoryDmc2Payload)?.RendezvousSuccessors.Count ?? 0))
+            return; // The independently authored anchored XUR chain advances even at the same route ceiling.
         var upper = checked(own.Proof.TrustedUpperUnixSeconds + reading.SampleSeconds - own.Proof.MonotonicSample);
         if (previous.CreatedAtUnixMilliseconds > checked(upper * 1000) ||
             previous.ExpiresAtUnixMilliseconds == 0 || checked(upper * 1000) >= previous.ExpiresAtUnixMilliseconds) return;
@@ -345,8 +349,17 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         var announce = FixedRoute(after.ExactCompletedRoute.Span, publication.Route.ExactRouteClosure.Span);
         if (steps.Count == 0 && !announce)
             throw new CryptographicException("The actual adopted publication has a missing public historical prefix.");
-        var authored = await ApplicationCoreCodec.AuthorVerifiedContactRouteHistoryPageAsync(before, steps, announce,
-            requestHash, publication.Route.Recipient, own.Network, own.Authority, logical, sequence, source.RendezvousTrustedTime, ct).ConfigureAwait(false);
+        AuthoredVerifiedContactRouteHistoryControl authored;
+        var successors = steps.Count == 0 && announce && requestHash.Span.IndexOfAnyExcept((byte)0) < 0
+            ? await EnsureOwnRendezvousContinuationUnderLeaseAsync(current, opened, read, own, source, held, ct).ConfigureAwait(false)
+            : [];
+        if (successors.Count > 0)
+            authored = await ApplicationCoreCodec.AuthorVerifiedContactRouteHistoryRendezvousAnnouncementAsync(before,
+                RendezvousAnchor(read), successors, publication.Route.Recipient, own.Network, own.Authority,
+                logical, sequence, source.RendezvousTrustedTime, ct).ConfigureAwait(false);
+        else
+            authored = await ApplicationCoreCodec.AuthorVerifiedContactRouteHistoryPageAsync(before, steps, announce,
+                requestHash, publication.Route.Recipient, own.Network, own.Authority, logical, sequence, source.RendezvousTrustedTime, ct).ConfigureAwait(false);
         await publication.RecheckAsync(ct).ConfigureAwait(false);
         await RequireOwnedRouteHistoryExchangesCurrentAsync(originals.RootHash, originals.OriginalRoots, held, ct).ConfigureAwait(false);
         await opened.WithPairedSqlAsync(read.Authored.PairedRead,

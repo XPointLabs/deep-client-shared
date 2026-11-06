@@ -8,6 +8,16 @@ using Deep.Protocol.ApplicationCore;
 namespace Deep.Client.Shared.Services;
 public sealed partial class DeepIdV2AccountService
 {
+    private async Task<DirectTextOutboxEntry> QueueOwnDirectTextAsync(Did2MessagingSessionScope scope,
+        ReadOnlyMemory<byte>? operation, string text, DeepIdV2ContactPathAuthoritySource source, CancellationToken ct)
+    {
+        source.RequireAccountOwner(this);
+        var pair = await source.VerifyForOwnMessagingAsync(this, scope, ct).ConfigureAwait(false);
+        using var verifier = OpenVerifier();
+        return await owner.QueueDirectTextAsync(TrustedUnixSeconds(), verifier, scope, operation, text,
+            pair.Own, pair.Peer, source, ct).ConfigureAwait(false);
+    }
+
     internal async Task<DirectTextOutboxEntry> CreateOwnDirectTextAsync(Did2MessagingSessionScope scope,
         string text, DeepIdV2ContactPathAuthoritySource source, CancellationToken ct)
     {

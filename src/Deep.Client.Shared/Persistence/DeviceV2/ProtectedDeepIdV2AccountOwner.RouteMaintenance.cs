@@ -93,6 +93,8 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                     catch { CryptographicOperations.ZeroMemory(proactiveRoot); throw; }
                 }
             }
+            if (result is null && await OwnRendezvousMaintenanceDueUnderLeaseAsync(current, opened,
+                head.Announcement, own, peer, source, held, ct).ConfigureAwait(false)) result = [];
         }
         try
         {

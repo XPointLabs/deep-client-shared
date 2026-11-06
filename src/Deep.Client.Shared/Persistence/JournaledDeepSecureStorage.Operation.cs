@@ -78,11 +78,13 @@ public sealed partial class JournaledDeepSecureStorage
 
     private void CheckGuard(InventoryRead current, Guard? guard)
     {
-        if (guard is null) return;
-        if (!current.Inventory.Values.TryGetValue(guard.Slot, out var descriptor))
-            throw new CryptographicException("Protected mutation guard disappeared.");
-        var value = ReadObject(current.Inventory, descriptor);
-        try { if (!Fixed(value, guard.Expected)) throw new CryptographicException("Protected mutation guard changed."); }
-        finally { CryptographicOperations.ZeroMemory(value); }
+        for (; guard is not null; guard = guard.Next)
+        {
+            if (!current.Inventory.Values.TryGetValue(guard.Slot, out var descriptor))
+                throw new CryptographicException("Protected mutation guard disappeared.");
+            var value = ReadObject(current.Inventory, descriptor);
+            try { if (!Fixed(value, guard.Expected)) throw new CryptographicException("Protected mutation guard changed."); }
+            finally { CryptographicOperations.ZeroMemory(value); }
+        }
     }
 }

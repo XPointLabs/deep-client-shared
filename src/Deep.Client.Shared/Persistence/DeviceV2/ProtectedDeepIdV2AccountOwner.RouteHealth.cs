@@ -77,7 +77,9 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         var history = await ReadAuthenticatedPeerRouteHistoryUnderLeaseAsync(current, opened, own, peer, source, held, ct).ConfigureAwait(false);
         await AuthenticatedInitialDmc2Batch.RequireRetainedMailboxRouteFactsAsync(history.Original,
             peer, own, source, held, ct).ConfigureAwait(false);
-        var xur = ContactCodec.Decode("XUR1", history.InboundXur1.Span);
+        var rendezvous = await ReadPeerRendezvousTipUnderLeaseAsync(opened, history.InboundXur1,
+            own, peer, source, held, ct).ConfigureAwait(false);
+        var xur = ContactCodec.Decode("XUR1", rendezvous.Tip.Span);
         var final = await RequireMessagingFreshnessAsync(current, own, peer, source, held, ct).ConfigureAwait(false);
         await RequireFinalMessagingFreshnessAsync(current, scope, own, peer, source, held, first, ct).ConfigureAwait(false);
         var lower = checked(peer.TrustedLowerUnixSeconds + final.SampleSeconds - peer.MonotonicSample);
@@ -86,6 +88,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             BinaryPrimitives.ReadUInt64BigEndian(record.Field(start).Span) <= lower &&
             upper < BinaryPrimitives.ReadUInt64BigEndian(record.Field(expiry).Span);
         held.RequireOwner(lease); ct.ThrowIfCancellationRequested();
-        return new(Covers(history.Head.Authorization, 12, 13), Covers(xur, 11, 12), history.Faulted);
+        return new(Covers(history.Head.Authorization, 12, 13), Covers(xur, 11, 12), history.Faulted || rendezvous.Faulted,
+            BinaryPrimitives.ReadUInt64BigEndian(xur.Field(4).Span));
     }
 }

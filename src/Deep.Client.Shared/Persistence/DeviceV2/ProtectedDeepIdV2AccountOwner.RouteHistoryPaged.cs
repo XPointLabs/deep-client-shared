@@ -72,6 +72,14 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 return false;
             }
             catch (RouteHistoryCannotAdvanceException) { }
+            if (control.RendezvousSuccessors.Count > 0)
+            {
+                using var rendezvousSource = await ReadRouteHistorySourcesUnderLeaseAsync(opened, subject,
+                    Did2RouteHistorySelection.Custody(operation.Span), held, ct).ConfigureAwait(false);
+                var message = ApplicationCoreCodec.DecodeDmc2(rendezvousSource.Original(rendezvousSource.Snapshot.SelectedOriginal.Reference).Span);
+                if (!await AdoptPeerRendezvousContinuationUnderLeaseAsync(opened, rendezvousSource, message,
+                    own, peer, source, held, ct).ConfigureAwait(false)) return false;
+            }
         }
         if (control.Mode == DeepIdV2ContactRouteHistoryMode.HistoryRequest) return false;
         await EnsureRouteHistoryBootstrapUnderLeaseAsync(current, opened, subject, own, peer, source, held, ct).ConfigureAwait(false);

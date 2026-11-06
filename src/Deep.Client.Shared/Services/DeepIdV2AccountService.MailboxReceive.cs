@@ -1,6 +1,7 @@
 using System.Security.Cryptography;
 using Deep.Client.Shared.Persistence.DeviceV2;
 using Deep.Client.Shared.Services.ContactV2;
+using Deep.Protocol.ApplicationCore;
 using Deep.Protocol.MessagingWire;
 
 namespace Deep.Client.Shared.Services;
@@ -95,6 +96,22 @@ public sealed partial class DeepIdV2AccountService
         return new(result.ProcessedEnvelopes, result.HasMore);
     }
 
+    // Background route maintenance may advance a nonempty page only when
+    // every actual authenticated and durably consumed native item is a route
+    // control. This classification grants no ACK capability; the ordinary
+    // owner below independently reconstructs and acknowledges the exact page.
+    internal Task<DeepIdV2MailboxSynchronizationResult> ReceiveContactMaintenanceMailboxPageAsync(
+        DeepIdV2ContactPathAuthoritySource source, CancellationToken ct = default) =>
+        ReceiveContactMaintenanceMailboxPageAsync(source, new Did2MailboxGrantOnionTransport(source),
+            new Did2OwnedMailboxOnionTransportFactory(), ct);
+
+    internal Task<DeepIdV2MailboxSynchronizationResult> ReceiveContactMaintenanceMailboxPageAsync(
+        DeepIdV2ContactPathAuthoritySource source, IDid2MailboxGrantTransport grants,
+        IDid2OwnedMailboxTransportFactory transport, CancellationToken ct = default) =>
+        OwnedMailboxRecovery.RunAsync(() => ProcessOwnMailboxPageAsync(source, grants, transport, true, ct,
+                contactRouteControlsOnly: true), () => source.DiscardUncapturedAuthorityAsync(ct),
+            () => Interlocked.Increment(ref mailboxResumes), () => Interlocked.Increment(ref recoveryLeaseWaits), ct);
+
     // Actual connected business entry; callers supply no page, mailbox selector,
     // signer, endpoint proof, semantic success flag or ACK list.
     internal Task<DeepIdV2MailboxSynchronizationResult> SynchronizeOwnMailboxAsync(DeepIdV2ContactPathAuthoritySource source,
@@ -102,7 +119,8 @@ public sealed partial class DeepIdV2AccountService
         ProcessOwnMailboxPageAsync(source, grants, transport, true, ct);
 
     private async Task<DeepIdV2MailboxSynchronizationResult> ProcessOwnMailboxPageAsync(DeepIdV2ContactPathAuthoritySource source,
-        IDid2MailboxGrantTransport grants, IDid2OwnedMailboxTransportFactory transport, bool acknowledge, CancellationToken ct)
+        IDid2MailboxGrantTransport grants, IDid2OwnedMailboxTransportFactory transport, bool acknowledge, CancellationToken ct,
+        bool contactRouteControlsOnly = false)
     {
         ArgumentNullException.ThrowIfNull(source); ArgumentNullException.ThrowIfNull(grants); ArgumentNullException.ThrowIfNull(transport);
         source.RequireAccountOwner(this);
@@ -121,18 +139,30 @@ public sealed partial class DeepIdV2AccountService
         // receive within this page. Initial/Braid and the later ACK keep their
         // independent parent source; no old loan or captured request is renewed.
         var scopes = new Dictionary<string, Did2MessagingSessionScope>(StringComparer.Ordinal);
+        var onlyRouteControls = true;
         foreach (var item in page.Items)
         {
             Did2MessagingSessionScope? scope;
             if (item.Envelope.Ciphertext.Span.StartsWith("DPH2"u8))
+            {
+                onlyRouteControls = false;
                 scope = await ReceiveOwnMailboxInitialCoreAsync(item.Envelope.Ciphertext, source, ct).ConfigureAwait(false);
+            }
             else if (item.Envelope.Ciphertext.Span.StartsWith("DBR2"u8))
+            {
+                onlyRouteControls = false;
                 scope = await ReceiveOwnBraidMailboxEnvelopeAsync(item.Envelope.Ciphertext, source, ct).ConfigureAwait(false);
+            }
             else
             {
                 // Unknown/group input still has no semantic fallback or ACK.
                 var received = await ReceiveOwnMessagingEnvelopeWithScopeAsync(item.Envelope.Ciphertext, receiveReads.Source, ct).ConfigureAwait(false);
-                using (received.Persisted) scope = received.Scope;
+                using (received.Persisted)
+                {
+                    scope = received.Scope;
+                    if (contactRouteControlsOnly)
+                        onlyRouteControls &= IsDurablyReceivedContactRouteControl(received.Persisted);
+                }
                 // Do not reopen/redecrypt the same catalog just to rediscover
                 // this key-free scope. Fresh ACK endpoint acquisition reads the
                 // actual catalog; ACK then reconstructs every native handoff.
@@ -145,7 +175,7 @@ public sealed partial class DeepIdV2AccountService
         // committed its authenticated semantic history. Disposing this private
         // descriptor never retires that page. Ordinary sync reopens/revalidates
         // it and reconstructs ACK authority independently, including after crash.
-        if (!acknowledge) return new(page.Items.Count, page.HasMore, 0);
+        if (!acknowledge || contactRouteControlsOnly && !onlyRouteControls) return new(page.Items.Count, page.HasMore, 0);
         // Receive/materialization can do cold native and SQL work for every
         // item. Fetch the ACK endpoint set only after the whole batch, so a
         // first item's proof is not needlessly aged by later receive commits.
@@ -178,5 +208,24 @@ public sealed partial class DeepIdV2AccountService
             return new(page.Items.Count, page.HasMore, acknowledged.DurableTombstones);
         }
         throw new CryptographicException("A matching current ACK endpoint set is unavailable.");
+    }
+
+    private static bool IsDurablyReceivedContactRouteControl(OwnedDid2MessagingPersistedEvent received)
+    {
+        try
+        {
+            using var authenticated = received.OwnAuthenticatedDmc2();
+            return authenticated.Use(bytes =>
+            {
+                var parsed = ApplicationCoreCodec.DecodeDmc2(bytes);
+                try { return parsed.ContentKind == Dmc2ContentKind.ContactRouteUpdate; }
+                finally { if (parsed.ParsedPayload is AttachmentOfferDmc2Payload offer) offer.Manifest.Dispose(); }
+            });
+        }
+        catch (Exception error) when (error is InvalidOperationException or InvalidDataException or CryptographicException or
+            ArgumentException or NotSupportedException)
+        {
+            return false; // Unproved classification always leaves the exact page deferred.
+        }
     }
 }

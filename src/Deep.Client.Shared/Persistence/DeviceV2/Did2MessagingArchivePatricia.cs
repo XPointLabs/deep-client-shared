@@ -188,6 +188,8 @@ internal static class Did2MessagingArchivePatricia
                 return;
             case Did2MessagingArchiveFamily.RouteControl:
                 if (selector.Length == 2 && selector[0] == 4 && selector[1] == 1) return;
+                if (selector.Length == 2 && selector[0] == 5 && selector[1] is 1 or 2) return;
+                if (selector.Length == 10 && selector[0] == 6 && selector[1] is 1 or 2 && U64(selector, 2) is > 0 and <= 59) return;
                 if (selector.Length == 42 && selector[0] == 1 && selector[1] is 1 or 2 && !Zero(selector[10..])) return;
                 if (selector.Length == 33 && selector[0] is 2 or 3 && !Zero(selector[1..])) return;
                 throw Bad();
@@ -204,7 +206,7 @@ internal static class Did2MessagingArchivePatricia
             Did2MessagingArchiveFamily.QualifiedPeerRoute => 136,
             Did2MessagingArchiveFamily.IncomingAttachment => 176,
             Did2MessagingArchiveFamily.RouteHistory => 224,
-            Did2MessagingArchiveFamily.RouteControl => selector[0] is 1 or 4 ? 96 : 88,
+            Did2MessagingArchiveFamily.RouteControl => selector[0] == 6 ? 240 : selector[0] == 5 ? 104 : selector[0] is 1 or 4 ? 96 : 88,
             _ => throw Bad()
         };
         if (value.Length != expectedBytes) throw Bad();
@@ -219,7 +221,16 @@ internal static class Did2MessagingArchivePatricia
         }
         if (family == Did2MessagingArchiveFamily.RouteControl)
         {
-            if (first.Kind != 2 || first.Direction != (selector[0] == 1 ? selector[1] : 1) || selector[0] is 1 or 4 && U64(value, 88) == 0) throw Bad();
+            if (selector[0] == 6)
+            {
+                var second = Did2MessagingArchiveReference.Decode(value.Slice(120, 88));
+                if (first.Kind != 2 || first.Direction != selector[1] || Zero(value.Slice(88, 32)) ||
+                    (second.IsAbsent ? !Zero(value[208..]) : second.Kind != 2 || second.Direction != selector[1] ||
+                     second.Ordinal <= first.Ordinal || Zero(value[208..]) || Fixed(value.Slice(88, 32), value[208..]))) throw Bad();
+                return;
+            }
+            if (first.Kind != 2 || first.Direction != (selector[0] is 1 or 5 ? selector[1] : 1) || selector[0] is 1 or 4 or 5 && U64(value, 88) == 0) throw Bad();
+            if (selector[0] == 5 && U64(value, 96) is 0 or > 59) throw Bad();
             return;
         }
         if (family == Did2MessagingArchiveFamily.QualifiedPeerRoute)

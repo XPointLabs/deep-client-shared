@@ -29,13 +29,38 @@ internal sealed partial class Did2MessagingSqlJournal
     {
         if (family == Did2MessagingArchiveFamily.RouteControl)
         {
-            if (selector[0] is not (1 or 4))
+            if (selector[0] == 6)
+            {
+                var firstSource = Did2MessagingArchiveReference.Decode(actual[..88], false);
+                var observedSource = Did2MessagingArchiveReference.Decode(observation[..88], false);
+                if (firstSource.Ordinal > observedSource.Ordinal) throw new CryptographicException("Rendezvous replay omitted its first native source.");
+                if (Fixed(actual.Slice(88, 32), observation.Slice(88, 32)))
+                {
+                    if (firstSource.Ordinal == observedSource.Ordinal && !Fixed(actual[..120], observation[..120]))
+                        throw new CryptographicException("Rendezvous replay changed its exact first source.");
+                    return firstSource.Ordinal == observedSource.Ordinal;
+                }
+                var conflictingSource = Did2MessagingArchiveReference.Decode(actual.Slice(120, 88));
+                if (conflictingSource.IsAbsent || conflictingSource.Ordinal > observedSource.Ordinal)
+                    throw new CryptographicException("Rendezvous replay omitted its first divergent native source.");
+                if (conflictingSource.Ordinal == observedSource.Ordinal && !Fixed(actual.Slice(120, 120), observation[..120]))
+                    throw new CryptographicException("Rendezvous replay changed its exact divergent source.");
+                return false; // One fact is counted once, at its first source.
+            }
+            if (selector[0] is not (1 or 4 or 5))
             {
                 if (!Fixed(actual, observation)) throw new CryptographicException("Full route correlation replay changes its unique original.");
                 return true;
             }
             var selected = Did2MessagingArchiveReference.Decode(actual[..88], false); var source = Did2MessagingArchiveReference.Decode(observation[..88], false);
             var actualSequence = Did2MessagingArchiveEncoding.U64(actual, 88); var observedSequence = Did2MessagingArchiveEncoding.U64(observation, 88);
+            if (selector[0] == 5)
+            {
+                var actualGeneration = Did2MessagingArchiveEncoding.U64(actual, 96);
+                var observedGeneration = Did2MessagingArchiveEncoding.U64(observation, 96);
+                if (actualGeneration < observedGeneration) throw new CryptographicException("Rendezvous replay omitted its greatest generation.");
+                if (actualGeneration > observedGeneration) return false;
+            }
             if (actualSequence < observedSequence || actualSequence == observedSequence && selected.Ordinal > source.Ordinal ||
                 selected.Ordinal == source.Ordinal && !Fixed(actual, observation)) throw new CryptographicException("Full endpoint/request replay did not retain its greatest authenticated sequence.");
             return selected.Ordinal == source.Ordinal;
@@ -88,8 +113,29 @@ internal sealed partial class Did2MessagingSqlJournal
                 throw new CryptographicException("A historical candidate changes its actual native generation or sender position.");
             return;
         }
-        if (reference.Kind != 2 || reference.Direction != 1 && leaf.Selector[0] != 1)
+        if (reference.Kind != 2 || reference.Direction != 1 && leaf.Selector[0] is not (1 or 5 or 6))
             throw new CryptographicException("Route correlation has another native source direction.");
+        if (leaf.Selector[0] == 5)
+        {
+            var message = ApplicationCoreCodec.DecodeDmc2(original.Plaintext);
+            if (message.ParsedPayload is not ContactRouteHistoryDmc2Payload { RendezvousSuccessors.Count: > 0 } page ||
+                reference.Direction != leaf.Selector[1] || message.SenderClientSequence != Did2MessagingArchiveEncoding.U64(leaf.Value, 88) ||
+                (ulong)page.RendezvousSuccessors.Count != Did2MessagingArchiveEncoding.U64(leaf.Value, 96))
+                throw new CryptographicException("Rendezvous observation lost its actual native announcement.");
+            if (reference.Direction == 2) Did2RouteProcessingMetadata.RequireReceivedEvent(original.Metadata.AsSpan(608, 64), message);
+            return;
+        }
+        if (leaf.Selector[0] == 6)
+        {
+            var message = ApplicationCoreCodec.DecodeDmc2(original.Plaintext);
+            var generation = BinaryPrimitives.ReadUInt64BigEndian(leaf.Selector[2..]);
+            if (message.ParsedPayload is not ContactRouteHistoryDmc2Payload page ||
+                page.RendezvousSuccessors.Count < (int)generation || reference.Direction != leaf.Selector[1] ||
+                !Fixed(SHA256.HashData(page.RendezvousSuccessors[(int)generation - 1].Span), leaf.Value.Slice(candidate ? 208 : 88, 32)))
+                throw new CryptographicException("Rendezvous generation witness changed its native signed source.");
+            if (reference.Direction == 2) Did2RouteProcessingMetadata.RequireReceivedEvent(original.Metadata.AsSpan(608, 64), message);
+            return;
+        }
         if (leaf.Selector[0] == 2 && !Fixed(leaf.Selector[1..], original.Metadata.AsSpan(300, 32)))
             throw new CryptographicException("Outgoing request correlation changes its actual native event hash.");
         if (reference.Direction == 2)

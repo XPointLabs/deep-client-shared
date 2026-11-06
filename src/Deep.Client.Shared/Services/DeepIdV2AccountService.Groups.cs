@@ -233,12 +233,15 @@ public sealed partial class DeepIdV2AccountService
             {
                 if (!retained.Contains(Convert.ToHexString(item.Operation)))
                 {
-                    await accountOperations.WaitAsync(ct).ConfigureAwait(false);
-                    try
+                    if (!item.NativeCommitted || !item.NativeMaterialized)
                     {
-                        using var native = await SendOwnMessagingAsync(conversation.Scope, item.Operation, item.Event, source, ct).ConfigureAwait(false);
+                        await accountOperations.WaitAsync(ct).ConfigureAwait(false);
+                        try
+                        {
+                            using var native = await SendOwnMessagingAsync(conversation.Scope, item.Operation, item.Event, source, ct).ConfigureAwait(false);
+                        }
+                        finally { accountOperations.Release(); }
                     }
-                    finally { accountOperations.Release(); }
                     var stored = await DeliverOwnMessagingAsync(conversation.Scope, item.Operation, source, ct).ConfigureAwait(false);
                     if (stored.IngressDispatched) ClientDeliveryEvents.Reached(ClientDeliveryPhase.StoreQuorum, item.Event);
                 }

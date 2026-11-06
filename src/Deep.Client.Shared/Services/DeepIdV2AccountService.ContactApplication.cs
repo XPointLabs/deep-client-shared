@@ -51,7 +51,12 @@ public sealed partial class DeepIdV2AccountService
                     own = await source.VerifyForOwnPreKeyAuthoringAsync(this, ct).ConfigureAwait(false);
                     var retained = await owner.ReadRetainedInitialStoreAsync(TrustedUnixSeconds(), verifier, existing, intent,
                         address, own, source, ct).ConfigureAwait(false);
-                    if (retained is not null) return new(new(existing), retained);
+                    if (retained is not null)
+                    {
+                        await RetainKnownContactAddressesAsync(new Dictionary<string, Deep.Protocol.Identity.DeepPermanentIdV2>
+                            { [new DeepIdV2Conversation(existing).ConversationId] = address }, ct).ConfigureAwait(false);
+                        return new(new(existing), retained);
+                    }
                 }
                 // The local projection selects work only, never authorizes a
                 // stop. The actual owner reloads the root, proves lower-time
@@ -71,7 +76,12 @@ public sealed partial class DeepIdV2AccountService
                         // actual Store recovery, must still beat peer resolve.
                         var retained = await owner.ReadRetainedInitialStoreAsync(TrustedUnixSeconds(), verifier, existing, intent,
                             address, own, source, ct).ConfigureAwait(false);
-                        if (retained is not null) return new(new(existing), retained);
+                        if (retained is not null)
+                        {
+                            await RetainKnownContactAddressesAsync(new Dictionary<string, Deep.Protocol.Identity.DeepPermanentIdV2>
+                                { [new DeepIdV2Conversation(existing).ConversationId] = address }, ct).ConfigureAwait(false);
+                            return new(new(existing), retained);
+                        }
                     }
                 }
             }
@@ -83,6 +93,8 @@ public sealed partial class DeepIdV2AccountService
             using var senderVerifier = OpenVerifier();
             var scope = await owner.EnsureSenderMessagingAsync(TrustedUnixSeconds(), senderVerifier, intent, initial, hello,
                 contact.Own, resolved.Authorization.Freshness, source, ct).ConfigureAwait(false);
+            await RetainKnownContactAddressesAsync(new Dictionary<string, Deep.Protocol.Identity.DeepPermanentIdV2>
+                { [new DeepIdV2Conversation(scope).ConversationId] = address }, ct).ConfigureAwait(false);
             var stored = await DeliverOwnInitialContactAsync(intent, resolved, source, grants, transport, ct, contactRead).ConfigureAwait(false);
             ct.ThrowIfCancellationRequested(); return new(new(scope), stored);
         }
@@ -141,8 +153,8 @@ public sealed partial class DeepIdV2AccountService
         finally { foreach (var bytes in new[] { op, retainedOp, exact }) CryptographicOperations.ZeroMemory(bytes); }
     }
 
-    // Creation durably reserves a command before exposing its operation. Sending
-    // that operation is a separate retry-only boundary, including after restart.
+    // Queue commits the exact authored command and sealed native transition in
+    // one protected inventory publication. Store remains a separate boundary.
     public async Task<ReadOnlyMemory<byte>> QueueTextAsync(DeepIdV2Conversation conversation, string text,
         DeepIdV2ContactPathAuthoritySource source, CancellationToken ct = default)
     {
@@ -150,10 +162,7 @@ public sealed partial class DeepIdV2AccountService
         source.RequireAccountOwner(this);
         _ = ApplicationCoreCodec.CreateMessageCreatePayload(text);
         using var reads = source.OpenCommandReadScope(); source = reads.Source;
-        var state = await ReadOwnContactAcceptanceAsync(conversation.Scope, source, ct).ConfigureAwait(false);
-        if (conversation.IsInitiator ? state != Did2ContactAcceptanceState.PeerAcceptanceRetained : state != Did2ContactAcceptanceState.LocalAcceptanceRetained)
-            throw new InvalidOperationException("The contact has not retained the required explicit acceptance.");
-        using var draft = await CreateOwnDirectTextAsync(conversation.Scope, text, source, ct).ConfigureAwait(false);
+        using var draft = await QueueOwnDirectTextAsync(conversation.Scope, null, text, source, ct).ConfigureAwait(false);
         return draft.OperationId.ToArray();
     }
 
@@ -182,9 +191,8 @@ public sealed partial class DeepIdV2AccountService
                 throw new InvalidOperationException("The contact has not retained the required explicit acceptance.");
             var retained = await ReadRetainedPublicTextStoreAsync(conversation.Scope, op, text, source, ct).ConfigureAwait(false);
             if (retained is not null) return retained;
-            using var draft = await PrepareOwnDirectTextAsync(conversation.Scope, op, text, source, ct).ConfigureAwait(false);
+            using var draft = await QueueOwnDirectTextAsync(conversation.Scope, op, text, source, ct).ConfigureAwait(false);
             exact = OwnedByteExports.TakeArray(draft.ExactDmc2);
-            using var sent = await SendOwnMessagingAsync(conversation.Scope, op, exact, source, ct).ConfigureAwait(false);
             var stored = await (recoverUnknown
                 ? DeliverOwnMessagingWithRecoveryAsync(conversation.Scope, op, source, grants, transport, ct)
                 : DeliverOwnMessagingAsync(conversation.Scope, op, source, grants, transport, ct)).ConfigureAwait(false);

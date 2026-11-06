@@ -25,6 +25,17 @@ internal static class Did2MessagingArchiveRouteFacts
         Did2MessagingArchivePatricia.RequireSelector(Did2MessagingArchiveFamily.RouteControl, raw); return raw;
     }
     internal static byte[] LatestRequestSelector() => [4, 1];
+    internal static byte[] LatestRendezvousSelector(byte direction)
+    {
+        if (direction is < 1 or > 2) throw Bad();
+        return [5, direction];
+    }
+    internal static byte[] RendezvousGenerationSelector(byte direction, ulong generation)
+    {
+        if (direction is < 1 or > 2 || generation is 0 or > 59) throw Bad();
+        var exact = new byte[10]; exact[0] = 6; exact[1] = direction;
+        BinaryPrimitives.WriteUInt64BigEndian(exact.AsSpan(2), generation); return exact;
+    }
     internal static byte[] Candidate(Did2RouteHistorySource source, ulong sequence)
     {
         var raw = new byte[224]; source.Exact.Span.CopyTo(raw.AsSpan(120));
@@ -70,7 +81,23 @@ internal static class Did2MessagingArchiveRouteFacts
     }
     internal static byte[] MergeControl(ReadOnlySpan<byte> selector, ReadOnlySpan<byte> previous, ReadOnlySpan<byte> incoming)
     {
-        if (selector[0] is not (1 or 4))
+        if (selector[0] == 6)
+        {
+            var candidates = new[] { previous[..120].ToArray(), previous.Slice(120, 120).ToArray(),
+                incoming[..120].ToArray(), incoming.Slice(120, 120).ToArray() }
+                .Where(value => !Did2MessagingArchiveReference.Decode(value.AsSpan(0, 88)).IsAbsent)
+                .OrderBy(value => Did2MessagingArchiveReference.Decode(value.AsSpan(0, 88), false).Ordinal).ToArray();
+            for (var index = 1; index < candidates.Length; index++)
+                if (Did2MessagingArchiveReference.Decode(candidates[index].AsSpan(0, 88), false).Ordinal ==
+                    Did2MessagingArchiveReference.Decode(candidates[index - 1].AsSpan(0, 88), false).Ordinal &&
+                    !Fixed(candidates[index], candidates[index - 1])) throw Bad();
+            var result = new byte[240]; candidates[0].CopyTo(result, 0);
+            foreach (var candidate in candidates.Skip(1))
+                if (!Fixed(candidate.AsSpan(88, 32), result.AsSpan(88, 32)))
+                { candidate.CopyTo(result, 120); break; }
+            return result;
+        }
+        if (selector[0] is not (1 or 4 or 5))
         {
             if (!Fixed(previous, incoming)) throw new CryptographicException("Route request/response custody has a different immutable original.");
             return previous.ToArray();
@@ -78,6 +105,11 @@ internal static class Did2MessagingArchiveRouteFacts
         var old = Did2MessagingArchiveReference.Decode(previous[..88], false);
         var next = Did2MessagingArchiveReference.Decode(incoming[..88], false);
         var oldSequence = U64(previous, 88); var nextSequence = U64(incoming, 88);
+        if (selector[0] == 5)
+        {
+            var oldGeneration = U64(previous, 96); var nextGeneration = U64(incoming, 96);
+            if (oldGeneration != nextGeneration) return (nextGeneration > oldGeneration ? incoming : previous).ToArray();
+        }
         if (nextSequence == oldSequence && next.Ordinal == old.Ordinal && !Fixed(previous, incoming)) throw Bad();
         return (nextSequence > oldSequence || nextSequence == oldSequence && next.Ordinal < old.Ordinal ? incoming : previous).ToArray();
     }

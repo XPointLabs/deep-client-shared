@@ -156,7 +156,11 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         HeldDeepIdV2AccountLease held, CancellationToken ct)
     {
         held.RequireOwner(lease);
-        if (history.Faulted)
+        var latestRendezvous = await ReadLatestNativeRendezvousUnderLeaseAsync(opened, 2, held, ct).ConfigureAwait(false);
+        var rendezvousFork = latestRendezvous is not null && await ReadNativeRendezvousForkUnderLeaseAsync(opened,
+            history.InboundXur1, ((ContactRouteHistoryDmc2Payload)latestRendezvous.Value.Message.ParsedPayload).RendezvousSuccessors.Count,
+            own, peer, source, held, ct).ConfigureAwait(false);
+        if (history.Faulted || rendezvousFork)
             throw new CryptographicException("Retained authenticated route fault fences this peer's new sends.");
         VerifiedDeepIdV2MailboxRouteClosure route;
         if (history.LastUpdate.IsEmpty)

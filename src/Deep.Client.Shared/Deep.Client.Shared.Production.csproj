@@ -48,6 +48,7 @@
     <Compile Include="Persistence\DeepAccountStoreContracts.cs" />
     <Compile Include="Persistence\DeepSecureStorage.cs" />
     <Compile Include="Persistence\DeepSecureStorageGuardedRead.cs" />
+    <Compile Include="Persistence\DeepSecureStorageAtomicMutation.cs" />
     <Compile Include="Persistence\OwnedByteExports.cs" />
     <Compile Include="Persistence\DeepSecureStorageRegistration.cs" />
     <Compile Include="Persistence\InMemoryDeepAccountStore.cs" />

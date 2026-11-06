@@ -17,8 +17,36 @@ public sealed record DeepIdV2ContactMaintenanceResult(int AcceptedContacts, int 
 
 public sealed partial class DeepIdV2AccountService
 {
+    private readonly ContactMaintenanceCursor backgroundMaintenanceCursor = new();
+    internal sealed class ContactMaintenanceCursor
+    {
+        private int next;
+        internal IReadOnlyList<DeepIdV2ConversationSnapshot> Select(IReadOnlyList<DeepIdV2ConversationSnapshot> contacts)
+        {
+            RequireContactMaintenanceMetadata(contacts);
+            var accepted = contacts.Where(item => item.ContactState is DeepIdV2ContactState.LocalAcceptanceRetained or
+                DeepIdV2ContactState.PeerAcceptanceRetained).OrderBy(item => Convert.ToHexString(item.Conversation.Scope.Hash),
+                    StringComparer.Ordinal).ToArray();
+            if (accepted.Length == 0) return [];
+            var selected = accepted[next % accepted.Length];
+            // Advance before any peer callback so one offline/refused contact
+            // cannot consume every later background opportunity.
+            next = (next + 1) % accepted.Length;
+            return [selected];
+        }
+    }
+
     /// <summary>Maximum caller-owned known address entries copied before one cycle.</summary>
     public const int MaximumKnownContactAddresses = 128;
+
+    internal async Task RetainKnownContactAddressesAsync(IReadOnlyDictionary<string, DeepPermanentIdV2>? supplied,
+        CancellationToken ct)
+    {
+        ct.ThrowIfCancellationRequested();
+        var addresses = supplied is null ? null : CopyKnownContactAddresses(supplied);
+        using var verifier = OpenVerifier();
+        _ = await owner.KnownContactAddressesAsync(TrustedUnixSeconds(), verifier, addresses, ct).ConfigureAwait(false);
+    }
     /// <summary>Renews the own publication through its existing proactive owner,
     /// receives one ordinary mailbox page, then advertises the adopted publication
     /// to every retained accepted contact. Expired/faulted peer routes are deferred,
@@ -32,24 +60,42 @@ public sealed partial class DeepIdV2AccountService
     public async Task<DeepIdV2ContactMaintenanceResult> MaintainContactRoutesAsync(
         DeepIdV2ContactPathAuthoritySource source,
         IReadOnlyDictionary<string, DeepPermanentIdV2>? knownContacts = null, CancellationToken ct = default)
+        => await MaintainContactRoutesCoreAsync(source, knownContacts, null, ct).ConfigureAwait(false);
+
+    internal Task<DeepIdV2ContactMaintenanceResult> MaintainContactRoutesInBackgroundAsync(
+        DeepIdV2ContactPathAuthoritySource source, IReadOnlyDictionary<string, DeepPermanentIdV2>? knownContacts,
+        CancellationToken ct)
+        => MaintainContactRoutesCoreAsync(source, knownContacts, backgroundMaintenanceCursor, ct);
+
+    private async Task<DeepIdV2ContactMaintenanceResult> MaintainContactRoutesCoreAsync(
+        DeepIdV2ContactPathAuthoritySource source, IReadOnlyDictionary<string, DeepPermanentIdV2>? knownContacts,
+        ContactMaintenanceCursor? cursor, CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(source); source.RequireAccountOwner(this);
         ct.ThrowIfCancellationRequested();
-        var addresses = CopyKnownContactAddresses(knownContacts);
+        var supplied = knownContacts is null ? null : CopyKnownContactAddresses(knownContacts);
+        using var verifier = OpenVerifier();
+        // Exact caller-supplied descriptors survive restart under this account's
+        // protected scope. They remain data; no public identifier creates one.
+        var addresses = await owner.KnownContactAddressesAsync(TrustedUnixSeconds(), verifier,
+            supplied, ct).ConfigureAwait(false);
         // Once per cycle, not once per contact. The producer independently
         // authenticates all signed refresh windows and resumes exact pending work.
         _ = await EnsureOwnPermanentContactPublishedAsync(source, ct).ConfigureAwait(false);
-        var page = await SynchronizeOwnMailboxAsync(source, ct).ConfigureAwait(false);
-        var result = await AdvertisePublishedContactRoutesAsync(source, addresses, ct).ConfigureAwait(false);
+        var page = cursor is null ? await SynchronizeOwnMailboxAsync(source, ct).ConfigureAwait(false) :
+            await ReceiveContactMaintenanceMailboxPageAsync(source, ct).ConfigureAwait(false);
+        var result = await AdvertisePublishedContactRoutesAsync(source, addresses, ct, cursor).ConfigureAwait(false);
         ct.ThrowIfCancellationRequested();
         return result with { ProcessedEnvelopes = page.ProcessedEnvelopes,
             DurableTombstones = page.DurableTombstones, HasMore = page.HasMore };
     }
 
     private async Task<DeepIdV2ContactMaintenanceResult> AdvertisePublishedContactRoutesAsync(
-        DeepIdV2ContactPathAuthoritySource source, IReadOnlyDictionary<string, DeepPermanentIdV2> addresses, CancellationToken ct)
+        DeepIdV2ContactPathAuthoritySource source, IReadOnlyDictionary<string, DeepPermanentIdV2> addresses, CancellationToken ct,
+        ContactMaintenanceCursor? cursor = null)
     {
         var contacts = await ListConversationsAsync(ct).ConfigureAwait(false);
+        if (cursor is not null) contacts = cursor.Select(contacts);
         var expiredDeferred = 0; var expiredReintroductions = 0;
         var result = await MaintainAcceptedContactRoutesAsync(contacts,
             (conversation, token) => ReadContactRouteHealthAsync(conversation, source, token),
@@ -94,11 +140,7 @@ public sealed partial class DeepIdV2AccountService
     {
         ArgumentNullException.ThrowIfNull(contacts); ArgumentNullException.ThrowIfNull(health);
         ArgumentNullException.ThrowIfNull(refresh); ct.ThrowIfCancellationRequested();
-        if (contacts.Any(item => item.ContactState is not (DeepIdV2ContactState.IncomingRequest or
-            DeepIdV2ContactState.OutgoingRequest or DeepIdV2ContactState.LocalAcceptanceRetained or
-            DeepIdV2ContactState.PeerAcceptanceRetained)) ||
-            contacts.Select(item => Convert.ToHexString(item.Conversation.Scope.Hash)).Distinct(StringComparer.Ordinal).Count() != contacts.Count)
-            throw new InvalidDataException("Contact maintenance requires unique current conversation metadata.");
+        RequireContactMaintenanceMetadata(contacts);
         var accepted = 0; var stored = 0; var deferred = 0; var recovered = 0;
         foreach (var item in contacts)
         {
@@ -130,5 +172,14 @@ public sealed partial class DeepIdV2AccountService
             stored += count;
         }
         ct.ThrowIfCancellationRequested(); return new(accepted, stored, deferred, 0, 0, false, recovered);
+    }
+
+    private static void RequireContactMaintenanceMetadata(IReadOnlyList<DeepIdV2ConversationSnapshot> contacts)
+    {
+        if (contacts.Any(item => item.ContactState is not (DeepIdV2ContactState.IncomingRequest or
+            DeepIdV2ContactState.OutgoingRequest or DeepIdV2ContactState.LocalAcceptanceRetained or
+            DeepIdV2ContactState.PeerAcceptanceRetained)) ||
+            contacts.Select(item => Convert.ToHexString(item.Conversation.Scope.Hash)).Distinct(StringComparer.Ordinal).Count() != contacts.Count)
+            throw new InvalidDataException("Contact maintenance requires unique current conversation metadata.");
     }
 }

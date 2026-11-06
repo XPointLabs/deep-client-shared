@@ -6,7 +6,8 @@ namespace Deep.Client.Shared.Services;
 /// <param name="AdvertisementIntervalCoversNow">Whether the retained peer XRA1 covers current trusted time.</param>
 /// <param name="UpdateIntervalCoversNow">Whether the original peer XUR1 covers current trusted time.</param>
 /// <param name="RouteFaultRetained">Whether actual native history retains a route fault.</param>
-public sealed record DeepIdV2ContactRouteHealth(bool AdvertisementIntervalCoversNow, bool UpdateIntervalCoversNow, bool RouteFaultRetained);
+public sealed record DeepIdV2ContactRouteHealth(bool AdvertisementIntervalCoversNow, bool UpdateIntervalCoversNow,
+    bool RouteFaultRetained, ulong UpdateGeneration = 0);
 
 public sealed partial class DeepIdV2AccountService
 {

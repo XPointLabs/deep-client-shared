@@ -173,7 +173,7 @@ public sealed partial class JournaledDeepSecureStorage
         {
             if (retiredName is not null && closed.Values.Values.Any(item => item.Name == retiredName))
                 throw new CryptographicException("Retirement selected an active object.");
-            if (authority.Guard is { } guard)
+            for (var guard = authority.Guard; guard is not null; guard = guard.Next)
             {
                 if (!closed.Values.TryGetValue(guard.Slot, out var descriptor))
                     throw new CryptographicException("Protected mutation guard disappeared.");

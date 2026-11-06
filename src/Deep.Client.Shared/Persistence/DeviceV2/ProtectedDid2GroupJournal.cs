@@ -44,6 +44,7 @@ internal static class ProtectedDid2GroupJournal
         // Transient scheduling hint from an actual verified native read, never
         // serialized and never Store/dispatch/ACK authority.
         internal bool NativeCommitted;
+        internal bool NativeMaterialized;
     }
     internal sealed class Message
     {

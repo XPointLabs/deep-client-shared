@@ -322,8 +322,10 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
 
     // Test-only backend reopen: same real journal file, new store/protector
     // handles. No runtime adapter, snapshot import or plaintext export.
-    private sealed class CompactionDiskFixtureStorage : IDeepSecureStorage, IDeepSecureStorageGuardedRead, IDisposable
+    private sealed class CompactionDiskFixtureStorage : IDeepSecureStorage, IDeepSecureStorageGuardedRead, IDeepSecureStorageAtomicMutation, IDisposable
     {
+        Task<bool> IDeepSecureStorageAtomicMutation.CompareExchangeBatchAsync(DeepSecureStorageAtomicMutation mutation, CancellationToken ct) =>
+            store.CompareExchangeBatchAsync(mutation.Expected, mutation.Writes.Select(pair => new DeepSecureStorageWrite(pair.Key, pair.Value)).ToArray(), ct);
         public Task<OwnedDeepSecretBatch> ReadOwnedBatchAsync(IReadOnlyList<string> slots,
             CancellationToken ct = default) => store.ReadOwnedBatchAsync(slots, ct);
         Task<OwnedDeepSecretBatch> IDeepSecureStorageGuardedRead.ReadOwnedGuardedBatchAsync(

@@ -70,6 +70,21 @@ internal sealed partial class Did2MessagingArchiveSemanticReplay
             observe(Did2MessagingArchiveFamily.RouteControl,
                 Did2MessagingArchiveRouteFacts.EndpointSelector(reference.Direction, BinaryPrimitives.ReadUInt64BigEndian(page.RightCursor.Span), page.RightCursor.Span.Slice(8, 32)), value);
         }
+        if (page.RendezvousSuccessors.Count > 0)
+        {
+            var value = new byte[104]; reference.Exact.Span.CopyTo(value);
+            BinaryPrimitives.WriteUInt64BigEndian(value.AsSpan(88), message.SenderClientSequence);
+            BinaryPrimitives.WriteUInt64BigEndian(value.AsSpan(96), (ulong)page.RendezvousSuccessors.Count);
+            observe(Did2MessagingArchiveFamily.RouteControl,
+                Did2MessagingArchiveRouteFacts.LatestRendezvousSelector(reference.Direction), value);
+            for (var i = 0; i < page.RendezvousSuccessors.Count; i++)
+            {
+                var generation = new byte[240]; reference.Exact.Span.CopyTo(generation);
+                SHA256.HashData(page.RendezvousSuccessors[i].Span, generation.AsSpan(88, 32));
+                observe(Did2MessagingArchiveFamily.RouteControl,
+                    Did2MessagingArchiveRouteFacts.RendezvousGenerationSelector(reference.Direction, (ulong)i + 1), generation);
+            }
+        }
         if (reference.Direction == 1 && page.Mode == DeepIdV2ContactRouteHistoryMode.HistoryRequest)
         {
             observe(Did2MessagingArchiveFamily.RouteControl, Did2MessagingArchiveRouteFacts.CorrelationSelector(2, native.Metadata.AsSpan(300, 32)), reference.Exact.Span);

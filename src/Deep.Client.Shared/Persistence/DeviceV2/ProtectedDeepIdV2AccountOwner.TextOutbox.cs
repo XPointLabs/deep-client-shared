@@ -11,6 +11,27 @@ namespace Deep.Client.Shared.Persistence.DeviceV2;
 
 internal sealed partial class ProtectedDeepIdV2AccountOwner
 {
+    internal async Task<DirectTextOutboxEntry> QueueDirectTextAsync(ulong trustedUnixSeconds,
+        IDeepMlDsa65Verifier verifier, Did2MessagingSessionScope scope, ReadOnlyMemory<byte>? operation, string text,
+        DeepIdV2ContactPathAuthoritySource.OwnPreKeyAuthoringAuthority own,
+        VerifiedDeepIdV2DirectoryFreshness peer, DeepIdV2ContactPathAuthoritySource source, CancellationToken ct)
+    {
+        var nativeWork = Did2MessagingSqlJournal.NativeWork.BeginOperation();
+        try
+        {
+            return await PrepareDirectAuthoredAsync(trustedUnixSeconds, verifier, scope, operation, text, ReadOnlyMemory<byte>.Empty,
+                own, peer, source, ct, atomicQueue: true).ConfigureAwait(false);
+        }
+        finally
+        {
+            if (nativeWork is not null)
+            {
+                nativeWork.Dispose();
+                ClientPersistenceTiming.PublishNativeCounts(nativeWork);
+            }
+        }
+    }
+
     internal Task<DirectTextOutboxEntry> CreateDirectTextAsync(ulong trustedUnixSeconds,
         IDeepMlDsa65Verifier verifier, Did2MessagingSessionScope scope, string text,
         DeepIdV2ContactPathAuthoritySource.OwnPreKeyAuthoringAuthority own,
@@ -57,7 +78,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         VerifiedDeepIdV2DirectoryFreshness peer, DeepIdV2ContactPathAuthoritySource source, CancellationToken ct, bool routeUpdate = false,
         OwnedRouteHistoryCommand historyCommand = OwnedRouteHistoryCommand.Announcement,
         ReadOnlyMemory<byte> historySelectionOperation = default,
-        RouteHistoryPreparation historyPreparation = RouteHistoryPreparation.DurableStaging)
+        RouteHistoryPreparation historyPreparation = RouteHistoryPreparation.DurableStaging, bool atomicQueue = false)
     {
         ArgumentNullException.ThrowIfNull(scope);
         if (operation is { } retryOperation) ProtectedDph2PreClaimJournal.RequireIntent(retryOperation.Span);
@@ -84,6 +105,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             OwnedInitialMessagingSeed.RequireFreshScope(scope, own.Proof, peer, first);
             if (operation is null) op = RandomNumberGenerator.GetBytes(32);
             await MaintainOrdinaryOutboxUnderLeaseAsync(current, held, scope, op, own, source, ct).ConfigureAwait(false);
+            if (atomicQueue) await MaintainNativePrefixUnderLeaseAsync(current, scope, held, ct).ConfigureAwait(false);
             using var opened = await OpenNativeMessagingUnderLeaseAsync(current, scope, held, ct).ConfigureAwait(false);
             var floor = await opened.Custody.ReconcileAsync(ct).ConfigureAwait(false);
             if (floor.Status != 1) throw new InvalidDataException("An inactive session cannot prepare a text command.");
@@ -97,6 +119,8 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 ApplicationCoreCodec.CreateAttachmentOfferPayload(manifest);
             if (!scope.IsInitiator)
                 await RequireRetainedAcceptanceForTextAsync(opened, application, own, peer, source, held, ct).ConfigureAwait(false);
+            else if (atomicQueue)
+                await RequireGroupContactConsentUnderLeaseAsync(current, held, opened, own, peer, source, ct).ConfigureAwait(false);
             using var owner = await storage.ReadOwnedAsync(ProtectedDid2DirectTextJournal.Slot, ct).ConfigureAwait(false) ??
                 throw new InvalidDataException("Protected text command custody is absent; no regeneration is permitted.");
             root = owner.Use(bytes => bytes.ToArray());
@@ -125,6 +149,8 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             if (journal.Pending is { } pending && (entry is null || !ReferenceEquals(pending, entry)))
                 throw new InvalidOperationException("Resume the existing pending text command before preparing another.");
             if (entry?.Pending == true) RequireRequestedAuthoredKind(entry.PendingDmc2, payload, routeUpdate, scope);
+            if (atomicQueue) await RequireEarlierAtomicOrdinaryCommittedAsync(opened, journal,
+                entry?.Sequence ?? journal.NextSequence(scope), ct).ConfigureAwait(false);
             if (entry is null)
             {
                 if (historyPreparation == RouteHistoryPreparation.ElectiveAnnouncement)
@@ -141,7 +167,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 if (committed is not null)
                     throw new CryptographicException("A committed operation without ordinary working custody cannot be authored again.");
                 journal.RequireCapacity(scope);
-                await RequireNewMailboxWorkCapacityUnderLeaseAsync(current, held, opened, scope, op,
+                if (!atomicQueue) await RequireNewMailboxWorkCapacityUnderLeaseAsync(current, held, opened, scope, op,
                     own, peer, source, verifier, ct).ConfigureAwait(false);
                 if (historyPreparation == RouteHistoryPreparation.CurrentRequestDispatch)
                 {
@@ -215,7 +241,14 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 catch { entry.Dispose(); throw; }
                 pendingBytes = ProtectedDid2DirectTextJournal.Encode(journal, scope.Network, scope.LocalAccount, scope.Instance);
                 ct.ThrowIfCancellationRequested(); held.RequireActive();
-                if (!await storage.CompareExchangeAsync(ProtectedDid2DirectTextJournal.Slot, root, pendingBytes, ct).ConfigureAwait(false))
+                if (atomicQueue)
+                {
+                    var original = entry.PendingDmc2.ToArray();
+                    try { await CommitAtomicTextQueueUnderLeaseAsync(current, held, opened, scope, op, original,
+                        root, pendingBytes, verifier, own, peer, source, first, ct).ConfigureAwait(false); }
+                    finally { CryptographicOperations.ZeroMemory(original); }
+                }
+                else if (!await storage.CompareExchangeAsync(ProtectedDid2DirectTextJournal.Slot, root, pendingBytes, ct).ConfigureAwait(false))
                     throw new CryptographicException("Text command custody changed under its account lease.");
                 await RequireExactProtectedMailboxRootAsync(ProtectedDid2DirectTextJournal.Slot, pendingBytes, ct).ConfigureAwait(false);
 #if DEEP_TEST_INTERNALS
@@ -227,7 +260,19 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             }
             if (result is null) throw new CryptographicException("The owned text command has no exact SQL readback.");
             var exact = OwnedByteExports.TakeArray(result.ExactDmc2);
-            try { entry!.RequireEvent(exact); RequireRequestedAuthoredKind(exact, payload, routeUpdate, scope); }
+            try
+            {
+                entry!.RequireEvent(exact); RequireRequestedAuthoredKind(exact, payload, routeUpdate, scope);
+                if (atomicQueue && pendingBytes.Length == 0)
+                    await CommitAtomicTextQueueUnderLeaseAsync(current, held, opened, scope, op, exact,
+                        root, root, verifier, own, peer, source, first, ct).ConfigureAwait(false);
+                if (atomicQueue)
+                {
+                    var stable = await opened.Custody.ReconcileAsync(ct).ConfigureAwait(false);
+                    using var handoff = await AuthenticatedDirectDmc2.FromOwnedDid2CommitAsync(opened, stable, op, exact, ct).ConfigureAwait(false);
+                    RequireApplicationDisposition(await application.MaterializeDirectDmc2Async(handoff, ct).ConfigureAwait(false));
+                }
+            }
             finally { CryptographicOperations.ZeroMemory(exact); }
             if (entry!.Pending)
             {

@@ -58,6 +58,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         // into this admission or mistake a valid intermediate prefix for damage.
         var recovered = await ResumeLocalCompactionUnderLeaseAsync(held, ct).ConfigureAwait(false);
         if (string.Equals(auditedNativeOwner, identity, StringComparison.Ordinal)) return recovered;
+        await ResumeGroupOrdinaryUnderLeaseAsync(current, held, ct).ConfigureAwait(false);
         var instance = await SqliteDeepIdV2AccountGeneration.ReadAccountInstanceUnderLeaseAsync(
             storage, networkId, current.AccountId, ct).ConfigureAwait(false);
         try
@@ -79,6 +80,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 using var opened = await SqliteDeepIdV2AccountGeneration.OpenEstablishedNativeArchiveAuditUnderLeaseAsync(
                     storage, sqlStatePath, current, scope, ct, configureRouteHistory: configured => ConfigureRouteHistoryDecisionRecovery(configured, held)).ConfigureAwait(false);
                 var floor = await opened.Custody.ReconcileAsync(ct).ConfigureAwait(false);
+                await RecoverAtomicTextProjectionUnderLeaseAsync(current, held, opened, floor, ct).ConfigureAwait(false);
                 var actualSql = await opened.WithSqlAsync(sql => sql.VerifyTip(), ct).ConfigureAwait(false);
                 if (!Did2MessagingSessionScope.Fixed(floor.Exact.Span, actualSql.Exact.Span))
                     throw new CryptographicException("Cold native archive audit lost its independent floor.");

@@ -58,6 +58,27 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         VerifiedDeepIdV2DirectoryFreshness? peer, DeepIdV2ContactPathAuthoritySource source, CancellationToken ct,
         IReadOnlyList<GroupTarget>? capturedTargets = null)
     {
+        var nativeWork = action == "send" ? Did2MessagingSqlJournal.NativeWork.BeginOperation() : null;
+        try
+        {
+            return await GroupActionCoreAsync(seconds, verifier, action, id, scope, value, own, peer, source, ct, capturedTargets).ConfigureAwait(false);
+        }
+        finally
+        {
+            if (nativeWork is not null)
+            {
+                nativeWork.Dispose();
+                ClientPersistenceTiming.PublishNativeCounts(nativeWork);
+            }
+        }
+    }
+
+    private async Task<string> GroupActionCoreAsync(ulong seconds, IDeepMlDsa65Verifier verifier,
+        string action, ReadOnlyMemory<byte> id, Did2MessagingSessionScope? scope, string? value,
+        DeepIdV2ContactPathAuthoritySource.OwnPreKeyAuthoringAuthority own,
+        VerifiedDeepIdV2DirectoryFreshness? peer, DeepIdV2ContactPathAuthoritySource source, CancellationToken ct,
+        IReadOnlyList<GroupTarget>? capturedTargets = null)
+    {
         using var held = await lease.AcquireAsync(ct).ConfigureAwait(false);
         await ResumeLocalCompactionUnderLeaseAsync(held, ct).ConfigureAwait(false);
         using var current = await RequireCurrentUnderLeaseAsync(seconds, verifier, ct).ConfigureAwait(false);
@@ -81,12 +102,16 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         if (targets.Length is < 1 or > 99 || targets.Select(t => Convert.ToHexString(t.Scope.RemoteAccount)).Distinct(StringComparer.Ordinal).Count() != targets.Length)
             throw new CryptographicException("Group target set is empty, repeated or exceeds its bound.");
         var readings = new List<Deep.Protocol.DeepExtension.PrivacyRouting.OnionMonotonicReading>();
+        using var queueSessions = new AtomicGroupQueueSessions();
         var capabilities = new Dictionary<string, VerifiedDeepIdV2GroupDirectory>(StringComparer.Ordinal);
         foreach (var target in targets)
         {
             var first = await RequireMessagingFreshnessAsync(current, target.Own, target.Peer, source, held, ct).ConfigureAwait(false);
             OwnedInitialMessagingSeed.RequireFreshScope(target.Scope, target.Own.Proof, target.Peer, first);
-            using var opened = await OpenNativeMessagingUnderLeaseAsync(current, target.Scope, held, ct).ConfigureAwait(false);
+            if (action == "send") await MaintainNativePrefixUnderLeaseAsync(current, target.Scope, held, ct).ConfigureAwait(false);
+            var opened = await OpenNativeMessagingUnderLeaseAsync(current, target.Scope, held, ct).ConfigureAwait(false);
+            using var temporaryOpened = action == "send" ? null : opened;
+            if (action == "send") queueSessions.Items.Add(Convert.ToHexString(target.Scope.Exact), opened);
             await RequireGroupContactConsentUnderLeaseAsync(current, held, opened, target.Own, target.Peer, source, ct).ConfigureAwait(false);
             if (target.Peer.CurrentCheckpoint!.Directory.Identity.ActiveDevices.Count != 1) throw new NotSupportedException("Group device enrollment is not yet qualified.");
             capabilities.Add(Convert.ToHexString(target.Scope.RemoteAccount), await DeepIdV2GroupDirectoryAuthority.VerifyAsync(target.Peer, source.RendezvousTrustedTime, ct).ConfigureAwait(false));
@@ -155,6 +180,11 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         if (ordinary.Pending is not null || ordinary.Entries.Count + recordCount > ProtectedDid2DirectTextJournal.MaximumEntries || root.State.Outbox.Count + recordCount > 512)
             throw new IOException("Complete group batch has no available ordinary capacity.");
         var sequences = targets.ToDictionary(t => Convert.ToHexString(t.Scope.Exact), t => ordinary.NextSequence(t.Scope), StringComparer.Ordinal);
+        if (action == "send")
+            foreach (var target in targets)
+                await RequireEarlierAtomicOrdinaryCommittedAsync(queueSessions.Items[Convert.ToHexString(target.Scope.Exact)], ordinary,
+                    sequences[Convert.ToHexString(target.Scope.Exact)], ct).ConfigureAwait(false);
+        var firstNewOutgoing = root.State.Outbox.Count;
         foreach (var item in records)
         {
             var selectedScope = item.Target.Scope; var key = Convert.ToHexString(selectedScope.Exact);
@@ -172,8 +202,32 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         }
         for (var index = 0; index < targets.Length; index++)
             await RequireFinalMessagingFreshnessAsync(current, targets[index].Scope, targets[index].Own, targets[index].Peer, source, held, readings[index], ct).ConfigureAwait(false);
-        await SaveGroupsUnderLeaseAsync(root, current, held, ct).ConfigureAwait(false);
+        if (action == "send")
+        {
+            var ordinaryBefore = ordinaryValue.Use(bytes => bytes.ToArray());
+            try { await CommitAtomicGroupQueueUnderLeaseAsync(current, held, root, targets, queueSessions,
+                root.State.Outbox.Skip(firstNewOutgoing).ToArray(), ordinaryBefore, verifier, source, readings, ct).ConfigureAwait(false); }
+            finally { CryptographicOperations.ZeroMemory(ordinaryBefore); }
+        }
+        else await SaveGroupsUnderLeaseAsync(root, current, held, ct).ConfigureAwait(false);
         await ResumeGroupOrdinaryUnderLeaseAsync(current, held, ct).ConfigureAwait(false);
+        if (action == "send")
+        {
+            using var adopted = await OpenGroupsUnderLeaseAsync(current, ct).ConfigureAwait(false);
+            foreach (var item in root.State.Outbox.Skip(firstNewOutgoing))
+            {
+                var target = targets.Single(value => FixedRoute(value.Scope.Exact, item.Scope));
+                var opened = queueSessions.Items[Convert.ToHexString(item.Scope)];
+                var floor = await opened.Custody.ReconcileAsync(ct).ConfigureAwait(false);
+                using var native = await opened.WithSqlAsync(sql => sql.ReadVerifiedOperation(floor, item.Operation), ct).ConfigureAwait(false) ??
+                    throw new CryptographicException("Atomic group queue lost its committed original before projection.");
+                await MaterializeGroupNativeUnderLeaseAsync(current, held, target.Scope, native,
+                    target.Own, target.Peer, source, ct, adopted).ConfigureAwait(false);
+            }
+            for (var index = 0; index < targets.Length; index++)
+                await RequireFinalMessagingFreshnessAsync(current, targets[index].Scope, targets[index].Own,
+                    targets[index].Peer, source, held, readings[index], ct).ConfigureAwait(false);
+        }
         return Convert.ToHexStringLower(id.Span);
     }
 

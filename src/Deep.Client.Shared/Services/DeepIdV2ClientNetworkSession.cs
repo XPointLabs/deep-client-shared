@@ -99,6 +99,18 @@ public sealed class DeepIdV2ClientNetworkSession : IDisposable
         _ = await accounts.EnsureOwnPermanentContactPublishedAsync(Source, ct).ConfigureAwait(false);
     }
 
+    /// <summary>Admits this account and retains actual supplied address-book
+    /// data for later idle maintenance. Performs no publication, mailbox receive,
+    /// advertisement, rendezvous renewal or business delivery.</summary>
+    public async Task ConnectForBackgroundMaintenanceAsync(
+        IReadOnlyDictionary<string, DeepPermanentIdV2>? knownContacts = null, CancellationToken ct = default)
+    {
+        ObjectDisposedException.ThrowIf(disposed, this);
+        var addresses = knownContacts is null ? null : DeepIdV2AccountService.CopyKnownContactAddresses(knownContacts);
+        await VerifyAdmissionAsync(ct).ConfigureAwait(false);
+        await accounts.RetainKnownContactAddressesAsync(addresses, ct).ConfigureAwait(false);
+    }
+
     /// <summary>Activates the connection's normal contact lifecycle after the
     /// host has installed its messaging owner: current admission, own publication,
     /// one receive/ACK page and all-contact advertisement. Does not install or
@@ -114,6 +126,22 @@ public sealed class DeepIdV2ClientNetworkSession : IDisposable
         var addresses = DeepIdV2AccountService.CopyKnownContactAddresses(knownContacts);
         await VerifyAdmissionAsync(ct).ConfigureAwait(false);
         var maintenance = await accounts.MaintainContactRoutesAsync(Source, addresses, ct).ConfigureAwait(false);
+        LastContactMaintenance = maintenance; return maintenance;
+    }
+
+    /// <summary>One idle receive page and one retained accepted contact, selected
+    /// fairly before peer callbacks. Call serially with business operations and
+    /// cancel when foreground work arrives. A failure advances no authority.</summary>
+    public async Task<DeepIdV2ContactMaintenanceResult> MaintainContactsInBackgroundAsync(
+        IReadOnlyDictionary<string, DeepPermanentIdV2>? knownContacts = null, CancellationToken ct = default)
+    {
+        ObjectDisposedException.ThrowIf(disposed, this);
+        LastContactMaintenance = null;
+        var addresses = knownContacts is null ? null : DeepIdV2AccountService.CopyKnownContactAddresses(knownContacts);
+        await DiscardUncapturedGroupAuthorityAsync(ct).ConfigureAwait(false);
+        await VerifyAdmissionAsync(ct).ConfigureAwait(false);
+        var maintenance = await accounts.MaintainContactRoutesInBackgroundAsync(Source, addresses,
+            ct).ConfigureAwait(false);
         LastContactMaintenance = maintenance; return maintenance;
     }
 

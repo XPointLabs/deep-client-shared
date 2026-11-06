@@ -143,6 +143,8 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                         if (native.Direction != 1 || !SHA256.HashData(item.Event).AsSpan().SequenceEqual(native.EventHash))
                             throw new CryptographicException("Group batch differs from actual native send custody.");
                         item.NativeCommitted = true;
+                        item.NativeMaterialized = root.State.Receives.Any(applied =>
+                            FixedRoute(applied.ScopeHash, scope.Hash) && FixedRoute(applied.Operation, item.Operation) && FixedRoute(applied.Hash, native.EventHash));
                     }
                 }
                 finally { foreach (var native in nativeRows) native?.Dispose(); }

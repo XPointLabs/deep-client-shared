@@ -18,20 +18,20 @@ internal sealed partial class Did2MessagingSqlJournal
         }
         internal static Counts Measure() { var result = new Counts(); Current.Value = result; return result; }
         internal static Counts? BeginOperation() => Current.Value is null ? Measure() : null;
-        internal static void Open() { if (Current.Value is { } value) value.Opens++; }
+        internal static void Open() { if (Current.Value is { } value) Interlocked.Increment(ref value.Opens); }
 #if DEEP_TEST_INTERNALS
-        internal static void InitialHandoff() { if (Current.Value is { } value) value.InitialHandoffs++; }
-        internal static void PagedPeerConsentRead() { if (Current.Value is { } value) value.PagedPeerConsentReads++; }
+        internal static void InitialHandoff() { if (Current.Value is { } value) Interlocked.Increment(ref value.InitialHandoffs); }
+        internal static void PagedPeerConsentRead() { if (Current.Value is { } value) Interlocked.Increment(ref value.PagedPeerConsentReads); }
 #endif
-        internal static void CipherScan() { if (Current.Value is { } value) value.CipherScans++; }
-        internal static void MetadataRow() { if (Current.Value is { } value) value.MetadataRows++; }
-        internal static void SuffixRow() { if (Current.Value is { } value) value.SuffixRows++; }
-        internal static void Payload() { if (Current.Value is { } value) value.Payloads++; }
-        internal static void Audit() { if (Current.Value is { } value) value.Audits++; }
-        internal static void Maintenance() { if (Current.Value is { } value) value.MaintenanceBatches++; }
+        internal static void CipherScan() { if (Current.Value is { } value) Interlocked.Increment(ref value.CipherScans); }
+        internal static void MetadataRow() { if (Current.Value is { } value) Interlocked.Increment(ref value.MetadataRows); }
+        internal static void SuffixRow() { if (Current.Value is { } value) Interlocked.Increment(ref value.SuffixRows); }
+        internal static void Payload() { if (Current.Value is { } value) Interlocked.Increment(ref value.Payloads); }
+        internal static void Audit() { if (Current.Value is { } value) Interlocked.Increment(ref value.Audits); }
+        internal static void Maintenance() { if (Current.Value is { } value) Interlocked.Increment(ref value.MaintenanceBatches); }
         internal static void Timing(ClientPersistencePhase phase, double milliseconds)
-        { if (Current.Value is { } value) value.Timings[(int)phase] += milliseconds; }
+        { if (Current.Value is { } value) lock (value) value.Timings[(int)phase] += milliseconds; }
         internal static void Inventory(ulong working, ulong archive)
-        { if (Current.Value is { } value) { value.WorkingCount = working; value.ArchiveCount = archive; } }
+        { if (Current.Value is { } value) lock (value) { value.WorkingCount = Math.Max(value.WorkingCount, working); value.ArchiveCount = Math.Max(value.ArchiveCount, archive); } }
     }
 }

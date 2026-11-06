@@ -245,6 +245,7 @@ internal sealed partial class Did2MessagingSqlJournal
                 if (!candidate.IsAbsent) { candidate.Reference.RequireAtBasis(basisOrdinal); VerifyWitness(candidate.Reference, node, true); }
             }
             var offset = node.Family switch { Did2MessagingArchiveFamily.PeerAuthoredPosition => 120, Did2MessagingArchiveFamily.IncomingAttachment => 88, _ => 0 };
+            if (node.Family == Did2MessagingArchiveFamily.RouteControl && node.Selector[0] == 6) offset = 120;
             if (offset != 0)
             {
                 var second = Did2MessagingArchiveReference.Decode(node.Value.Slice(offset, 88));

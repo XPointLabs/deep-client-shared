@@ -11,6 +11,24 @@ namespace Deep.Client.Shared.Production.Tests;
 public sealed class ContactRouteMaintenanceCycleTests
 {
     [Fact]
+    public async Task BackgroundCursorAdvancesBeforePeerFailureAndVisitsAllAcceptedDeviceScopes()
+    {
+        var contacts = new[] { Contact(1, DeepIdV2ContactState.IncomingRequest),
+            Contact(2, DeepIdV2ContactState.LocalAcceptanceRetained), Contact(3, DeepIdV2ContactState.PeerAcceptanceRetained) };
+        var cursor = new DeepIdV2AccountService.ContactMaintenanceCursor();
+        var visited = new HashSet<string>();
+        for (var cycle = 0; cycle < 2; cycle++)
+        {
+            var selected = Assert.Single(cursor.Select(contacts));
+            Assert.True(visited.Add(Convert.ToHexString(selected.Conversation.Scope.Hash)));
+            await Assert.ThrowsAsync<IOException>(() => Run([selected],
+                (_, _) => Task.FromResult(new DeepIdV2ContactRouteHealth(true, true, false)),
+                (_, _) => throw new IOException("Unit-only offline peer.")));
+        }
+        Assert.Equal(2, visited.Count);
+    }
+
+    [Fact]
     public async Task EveryAcceptedOrientationIsVisitedButPendingConsentNeverRefreshes()
     {
         var contacts = new[] { Contact(1, DeepIdV2ContactState.IncomingRequest),

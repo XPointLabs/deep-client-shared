@@ -221,7 +221,11 @@ internal sealed partial class Did2MessagingSqlJournal
                     }
                     if (!selection.IsCurrent && !selection.IsPositionConflict) AddOriginal(Did2RouteHistorySource.Decode(value.AsSpan(120, 96)).Reference);
                 }
-                else AddOriginal(Did2MessagingArchiveReference.Decode(value.AsSpan(0, 88), false));
+                else
+                {
+                    AddOriginal(Did2MessagingArchiveReference.Decode(value.AsSpan(0, 88), false));
+                    if (selector.Selector.Span[0] == 6) AddOriginal(Did2MessagingArchiveReference.Decode(value.AsSpan(120, 88)));
+                }
             }
             Did2MessagingArchiveReference? positionConflict = null; byte[]? positionFact = null;
             if (selection.IsPositionConflict)

@@ -25,13 +25,14 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
     private async Task RequireGroupAdmissionUnderLeaseAsync(VerifiedDeepIdV2CurrentAccount current,
         HeldDeepIdV2AccountLease held, OwnedDid2MessagingStorage opened, Did2MessagingSessionScope scope, ParsedDmc2 parsed, bool send,
         DeepIdV2ContactPathAuthoritySource.OwnPreKeyAuthoringAuthority own, VerifiedDeepIdV2DirectoryFreshness peer,
-        DeepIdV2ContactPathAuthoritySource source, CancellationToken ct)
+        DeepIdV2ContactPathAuthoritySource source, CancellationToken ct, GroupRoot? borrowedRoot = null)
     {
         var record = RequireGroupEnvelope(parsed, scope, send);
         await RequireGroupContactConsentUnderLeaseAsync(current, held, opened, own, peer, source, ct).ConfigureAwait(false);
         if (own.Proof.CurrentCheckpoint!.Directory.Identity.ActiveDevices.Count != 1 || peer.CurrentCheckpoint!.Directory.Identity.ActiveDevices.Count != 1)
             throw new NotSupportedException("Connected group candidate supports one device per account.");
-        using var root = await OpenGroupsUnderLeaseAsync(current, ct).ConfigureAwait(false);
+        using var ownedRoot = borrowedRoot is null ? await OpenGroupsUnderLeaseAsync(current, ct).ConfigureAwait(false) : null;
+        var root = borrowedRoot ?? ownedRoot!;
         if (send)
         {
             if (!root.State.Outbox.Any(item => item.Scope.AsSpan().SequenceEqual(scope.Exact) && item.Event.AsSpan().SequenceEqual(parsed.CanonicalBytes.Span)))

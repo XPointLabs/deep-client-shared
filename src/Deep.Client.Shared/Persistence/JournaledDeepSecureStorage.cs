@@ -13,7 +13,7 @@ public interface IDeepSecretProtector
 
 /// <summary>One protected complete inventory and immutable authenticated value
 /// objects. The constructor opens existing state; creation/enrollment are explicit.</summary>
-public sealed partial class JournaledDeepSecureStorage : IDeepSecureStorage, IDeepSecureStorageGuardedRead, IDisposable
+public sealed partial class JournaledDeepSecureStorage : IDeepSecureStorage, IDeepSecureStorageGuardedRead, IDeepSecureStorageAtomicMutation, IDisposable
 {
     private const int MaximumEntries = DeepSecureStorageRegistration.MaximumEntries;
     private const int MaximumSlotBytes = 512;
@@ -141,7 +141,37 @@ public sealed partial class JournaledDeepSecureStorage : IDeepSecureStorage, IDe
         _ = await MutateAsync(MutationKind.PurgeV2, null, null, null, [], cancellationToken).ConfigureAwait(false);
 
     private enum MutationKind { Insert, Replace, Register, GuardedDelete, Delete, PurgeV1, PurgeV2 }
-    private sealed record Guard(string Slot, byte[] Expected);
+    private sealed record Guard(string Slot, byte[] Expected, Guard? Next = null);
+
+    async Task<bool> IDeepSecureStorageAtomicMutation.CompareExchangeBatchAsync(DeepSecureStorageAtomicMutation mutation, CancellationToken ct)
+    {
+        await gate.WaitAsync(ct).ConfigureAwait(false);
+        try
+        {
+            ThrowIfDisposed(); using var owned = await BeginOperationAsync(ct).ConfigureAwait(false);
+            using var current = await AdmitMutationAsync(ct).ConfigureAwait(false);
+            Guard? guards = null;
+            foreach (var pair in mutation.Expected)
+            {
+                if (!current.Inventory.Values.TryGetValue(pair.Key, out var descriptor))
+                { await CloseUnchangedMutationAsync(current, ct).ConfigureAwait(false); return false; }
+                var actual = ReadObject(current.Inventory, descriptor);
+                bool matches;
+                try { matches = Fixed(actual, pair.Value); }
+                finally { CryptographicOperations.ZeroMemory(actual); }
+                if (!matches) { await CloseUnchangedMutationAsync(current, ct).ConfigureAwait(false); return false; }
+                guards = new(pair.Key, pair.Value, guards);
+            }
+            if (mutation.Writes.Keys.Any(slot => !mutation.Expected.ContainsKey(slot) && current.Inventory.Values.ContainsKey(slot)))
+            { await CloseUnchangedMutationAsync(current, ct).ConfigureAwait(false); return false; }
+            var lengths = current.Inventory.Values.ToDictionary(pair => pair.Key, pair => pair.Value.Length, StringComparer.Ordinal);
+            foreach (var pair in mutation.Writes) lengths[pair.Key] = pair.Value.Length;
+            DeepSecureStorageRegistration.ValidateInventoryLengths(lengths);
+            await PublishMutationAsync(current, mutation.Writes, [], guards, ct).ConfigureAwait(false);
+            auditRequired = 0; return true;
+        }
+        finally { gate.Release(); }
+    }
 
     private async Task<bool> MutateAsync(MutationKind kind, string? slot, byte[]? expected,
         IReadOnlyDictionary<string, byte[]>? writes, string[] deletions, CancellationToken ct)

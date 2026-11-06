@@ -350,6 +350,12 @@ internal sealed partial class Did2MessagingSqlJournal
                         }
                     if (page.Mode is DeepIdV2ContactRouteHistoryMode.Announcement or DeepIdV2ContactRouteHistoryMode.EvidenceAndAnnouncement)
                         Add(Did2MessagingArchiveFamily.RouteControl, Did2MessagingArchiveRouteFacts.EndpointSelector(reference.Direction, BinaryPrimitives.ReadUInt64BigEndian(page.RightCursor.Span), page.RightCursor.Span.Slice(8, 32)));
+                    if (page.RendezvousSuccessors.Count > 0)
+                    {
+                        Add(Did2MessagingArchiveFamily.RouteControl, Did2MessagingArchiveRouteFacts.LatestRendezvousSelector(reference.Direction));
+                        for (var i = 0; i < page.RendezvousSuccessors.Count; i++)
+                            Add(Did2MessagingArchiveFamily.RouteControl, Did2MessagingArchiveRouteFacts.RendezvousGenerationSelector(reference.Direction, (ulong)i + 1));
+                    }
                     if (reference.Direction == 1 && page.Mode == DeepIdV2ContactRouteHistoryMode.HistoryRequest)
                     {
                         Add(Did2MessagingArchiveFamily.RouteControl, Did2MessagingArchiveRouteFacts.CorrelationSelector(2, native.Metadata.AsSpan(300, 32)));

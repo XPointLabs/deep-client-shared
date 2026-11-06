@@ -10,7 +10,7 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
 {
     [Fact]
     [Trait("RequiresApprovedMlKemRuntime", "true")]
-    public async Task Did2Text_QueueBorrowsOneVerifiedEndpointPairForConsentAndAuthoringOnly()
+    public async Task Did2Text_QueueBorrowsOneVerifiedEndpointPairForAtomicLocalSend()
     {
         await using var fixture = await Fixture.CreateAsync(withPeer: true);
         var (complete, hello, init, _, _) = await fixture.PrepareNativeHelloCompletion(Bytes(32, 0x73));
@@ -29,7 +29,9 @@ public sealed partial class DeepIdV2ContactPathAuthoritySourceTests
         var second = await fixture.QueueNativeText(sender, "another independent queue");
         Assert.Equal(before + 2, fixture.ProofRequests); // No leaked command scope.
         Assert.NotEqual(first, second);
-        Assert.Equal(nativeBefore.Exact.ToArray(), (await fixture.ReadMessagingFloor(sender)).Exact.ToArray());
+        var nativeAfter = await fixture.ReadMessagingFloor(sender);
+        Assert.Equal(nativeBefore.RatchetGeneration + 2, nativeAfter.RatchetGeneration);
+        Assert.Equal(nativeBefore.Ordinal + 2, nativeAfter.Ordinal);
         Assert.Equal(2, (await fixture.ListNativePendingText()).Count);
     }
 
