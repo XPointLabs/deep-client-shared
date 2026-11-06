@@ -73,9 +73,10 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
     internal Task<DirectTextOutboxEntry> PrepareDirectRouteUpdateAsync(ulong trustedUnixSeconds,
         IDeepMlDsa65Verifier verifier, Did2MessagingSessionScope scope, ReadOnlyMemory<byte> operation,
         DeepIdV2ContactPathAuthoritySource.OwnPreKeyAuthoringAuthority own,
-        VerifiedDeepIdV2DirectoryFreshness peer, DeepIdV2ContactPathAuthoritySource source, CancellationToken ct)
+        VerifiedDeepIdV2DirectoryFreshness peer, DeepIdV2ContactPathAuthoritySource source, CancellationToken ct,
+        DeepIdV2ContactPathAuthoritySource.PermanentContactAuthority? reintroduction = null)
         => PrepareDirectAuthoredAsync(trustedUnixSeconds, verifier, scope, operation, null,
-            ReadOnlyMemory<byte>.Empty, own, peer, source, ct, routeUpdate: true);
+            ReadOnlyMemory<byte>.Empty, own, peer, source, ct, routeUpdate: true, reintroduction: reintroduction);
 
     private async Task<DirectTextOutboxEntry> PrepareDirectAuthoredAsync(ulong trustedUnixSeconds,
         IDeepMlDsa65Verifier verifier, Did2MessagingSessionScope scope, ReadOnlyMemory<byte>? operation,
@@ -84,9 +85,12 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         OwnedRouteHistoryCommand historyCommand = OwnedRouteHistoryCommand.Announcement,
         ReadOnlyMemory<byte> historySelectionOperation = default,
         RouteHistoryPreparation historyPreparation = RouteHistoryPreparation.DurableStaging, bool atomicQueue = false,
-        List<ClientDeliveryObservation>? deliveryObservations = null)
+        List<ClientDeliveryObservation>? deliveryObservations = null,
+        DeepIdV2ContactPathAuthoritySource.PermanentContactAuthority? reintroduction = null)
     {
         ArgumentNullException.ThrowIfNull(scope);
+        if (reintroduction is not null && (!routeUpdate || atomicQueue || text is not null || !assetOperation.IsEmpty))
+            throw new CryptographicException("Resolved re-introduction authority is restricted to owned route controls.");
         if (operation is { } retryOperation) ProtectedDph2PreClaimJournal.RequireIntent(retryOperation.Span);
         if (routeUpdate)
         {
@@ -155,6 +159,9 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             if (journal.Pending is { } pending && (entry is null || !ReferenceEquals(pending, entry)))
                 throw new InvalidOperationException("Resume the existing pending text command before preparing another.");
             if (entry?.Pending == true) RequireRequestedAuthoredKind(entry.PendingDmc2, payload, routeUpdate, scope);
+            if (entry is not null && reintroduction is not null)
+                _ = await RequireRouteReintroductionUnderLeaseAsync(current, held, opened, reintroduction,
+                    source, ReadOnlyMemory<byte>.Empty, ct).ConfigureAwait(false);
             if (atomicQueue) await RequireEarlierAtomicOrdinaryCommittedAsync(opened, journal,
                 entry?.Sequence ?? journal.NextSequence(scope), ct).ConfigureAwait(false);
             if (entry is null)
@@ -174,7 +181,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                     throw new CryptographicException("A committed operation without ordinary working custody cannot be authored again.");
                 journal.RequireCapacity(scope);
                 if (!atomicQueue) await RequireNewMailboxWorkCapacityUnderLeaseAsync(current, held, opened, scope, op,
-                    own, peer, source, verifier, ct).ConfigureAwait(false);
+                    own, peer, source, verifier, ct, reintroduction).ConfigureAwait(false);
                 if (historyPreparation == RouteHistoryPreparation.CurrentRequestDispatch)
                 {
                     if (!routeUpdate || historyCommand != OwnedRouteHistoryCommand.Request)
@@ -299,6 +306,9 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
 #endif
             }
             await RequireFinalMessagingFreshnessAsync(current, scope, own, peer, source, held, first, ct).ConfigureAwait(false);
+            if (reintroduction is not null)
+                _ = await RequireRouteReintroductionUnderLeaseAsync(current, held, opened, reintroduction,
+                    source, ReadOnlyMemory<byte>.Empty, ct).ConfigureAwait(false);
             if (publication is not null)
             {
                 await publication.RecheckAsync(ct).ConfigureAwait(false);

@@ -43,11 +43,11 @@ public sealed partial class DeepIdV2AccountService
         try
         {
             using var command = selection.Length == 0
-                ? await CreateOwnElectiveRouteAnnouncementAsync(conversation.Scope, source, ct).ConfigureAwait(false)
-                : await PrepareOwnDirectRouteUpdateAsync(conversation.Scope, selection, source, ct).ConfigureAwait(false);
+                ? await CreateOwnElectiveRouteAnnouncementAsync(conversation.Scope, source, ct, resolved).ConfigureAwait(false)
+                : await PrepareOwnDirectRouteUpdateAsync(conversation.Scope, selection, source, ct, resolved).ConfigureAwait(false);
             if (command is null) return 0;
             using var native = await SendOwnedMessagingCoreAsync(conversation.Scope, command.OperationId,
-                command.ExactDmc2, source, ct, routeControl: true).ConfigureAwait(false);
+                command.ExactDmc2, source, ct, routeControl: true, reintroduction: resolved).ConfigureAwait(false);
             _ = await DeliverOwnRouteReintroductionWithRecoveryAsync(conversation.Scope, command.OperationId,
                 peerAddress, resolved, source, new Did2MailboxGrantOnionTransport(source),
                 new Did2OwnedMailboxOnionTransportFactory(), ct).ConfigureAwait(false);
@@ -170,11 +170,11 @@ public sealed partial class DeepIdV2AccountService
                     resolved, dispatchSource, ct).ConfigureAwait(false);
             }
             using var command = selection.Length == 0
-                ? await CreateOwnElectiveRouteAnnouncementAsync(conversation.Scope, dispatchSource, ct).ConfigureAwait(false)
-                : await PrepareOwnDirectRouteUpdateAsync(conversation.Scope, selection, dispatchSource, ct).ConfigureAwait(false);
+                ? await CreateOwnElectiveRouteAnnouncementAsync(conversation.Scope, dispatchSource, ct, resolved).ConfigureAwait(false)
+                : await PrepareOwnDirectRouteUpdateAsync(conversation.Scope, selection, dispatchSource, ct, resolved).ConfigureAwait(false);
             if (command is null) return new(0, false, expired);
             using var native = await SendOwnedMessagingCoreAsync(conversation.Scope, command.OperationId,
-                command.ExactDmc2, dispatchSource, ct, routeControl: true).ConfigureAwait(false);
+                command.ExactDmc2, dispatchSource, ct, routeControl: true, reintroduction: resolved).ConfigureAwait(false);
             if (resolved is null)
                 _ = await DeliverOwnMessagingAsync(conversation.Scope, command.OperationId, dispatchSource, ct).ConfigureAwait(false);
             else
@@ -187,12 +187,13 @@ public sealed partial class DeepIdV2AccountService
     }
 
     internal async Task<DirectTextOutboxEntry?> CreateOwnElectiveRouteAnnouncementAsync(Did2MessagingSessionScope scope,
-        DeepIdV2ContactPathAuthoritySource source, CancellationToken ct)
+        DeepIdV2ContactPathAuthoritySource source, CancellationToken ct,
+        DeepIdV2ContactPathAuthoritySource.PermanentContactAuthority? reintroduction = null)
     {
         source.RequireAccountOwner(this);
-        var pair = await source.VerifyForOwnMessagingAsync(this, scope, ct).ConfigureAwait(false);
+        var pair = await source.VerifyForOwnMessagingAsync(this, scope, ct, reintroduction?.Own).ConfigureAwait(false);
         using var verifier = OpenVerifier();
         return await owner.PrepareElectiveRouteAnnouncementAsync(TrustedUnixSeconds(), verifier, scope,
-            pair.Own, pair.Peer, source, ct).ConfigureAwait(false);
+            pair.Own, pair.Peer, source, ct, reintroduction).ConfigureAwait(false);
     }
 }

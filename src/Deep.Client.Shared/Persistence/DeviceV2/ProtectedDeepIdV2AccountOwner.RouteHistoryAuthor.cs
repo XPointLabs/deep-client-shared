@@ -21,13 +21,14 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
     internal async Task<DirectTextOutboxEntry?> PrepareElectiveRouteAnnouncementAsync(ulong seconds,
         IDeepMlDsa65Verifier verifier, Did2MessagingSessionScope scope,
         DeepIdV2ContactPathAuthoritySource.OwnPreKeyAuthoringAuthority own, VerifiedDeepIdV2DirectoryFreshness peer,
-        DeepIdV2ContactPathAuthoritySource source, CancellationToken ct)
+        DeepIdV2ContactPathAuthoritySource source, CancellationToken ct,
+        DeepIdV2ContactPathAuthoritySource.PermanentContactAuthority? reintroduction = null)
     {
         try
         {
             return await PrepareDirectAuthoredAsync(seconds, verifier, scope, null, null, ReadOnlyMemory<byte>.Empty,
                 own, peer, source, ct, routeUpdate: true,
-                historyPreparation: RouteHistoryPreparation.ElectiveAnnouncement).ConfigureAwait(false);
+                historyPreparation: RouteHistoryPreparation.ElectiveAnnouncement, reintroduction: reintroduction).ConfigureAwait(false);
         }
         catch (RouteHistoryWorkNotRequiredException) { return null; }
     }

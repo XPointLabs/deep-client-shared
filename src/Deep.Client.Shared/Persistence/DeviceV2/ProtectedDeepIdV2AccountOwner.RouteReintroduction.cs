@@ -24,7 +24,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             ReadOnlyMemory<byte>.Empty, ct).ConfigureAwait(false);
     }
 
-    private async Task RequireRouteReintroductionUnderLeaseAsync(VerifiedDeepIdV2CurrentAccount current,
+    private async Task<VerifiedDeepIdV2PermanentContactResolveClosure> RequireRouteReintroductionUnderLeaseAsync(VerifiedDeepIdV2CurrentAccount current,
         HeldDeepIdV2AccountLease held, OwnedDid2MessagingStorage opened,
         DeepIdV2ContactPathAuthoritySource.PermanentContactAuthority resolved,
         DeepIdV2ContactPathAuthoritySource source, ReadOnlyMemory<byte> operation, CancellationToken ct)
@@ -48,6 +48,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         await RequireFinalMessagingFreshnessAsync(current, opened.Scope, resolved.Own, peer, source, held, first, ct).ConfigureAwait(false);
         await contact.Contact.Route.EnsureCurrentAsync(ct).ConfigureAwait(false);
         ct.ThrowIfCancellationRequested(); held.RequireOwner(lease);
+        return contact.Contact;
     }
 
     // Classification comes from the original independently authenticated native

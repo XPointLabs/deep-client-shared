@@ -97,9 +97,12 @@ public sealed partial class DeepIdV2AccountService
 
     private async Task<OwnedDid2MessagingPersistedEvent> SendOwnedMessagingCoreAsync(Did2MessagingSessionScope scope,
         ReadOnlyMemory<byte> operation, ReadOnlyMemory<byte> exactDmc2,
-        DeepIdV2ContactPathAuthoritySource source, CancellationToken ct, bool routeControl)
+        DeepIdV2ContactPathAuthoritySource source, CancellationToken ct, bool routeControl,
+        DeepIdV2ContactPathAuthoritySource.PermanentContactAuthority? reintroduction = null)
     {
         ArgumentNullException.ThrowIfNull(scope); ArgumentNullException.ThrowIfNull(source);
+        if (reintroduction is not null && !routeControl)
+            throw new CryptographicException("Resolved re-introduction authority cannot admit an application payload.");
         ProtectedDph2PreClaimJournal.RequireIntent(operation.Span);
         if (exactDmc2.IsEmpty || exactDmc2.Length > 33082) throw new InvalidDataException("DID2 send exceeds its closed bound.");
         var op = operation.ToArray(); var exact = exactDmc2.ToArray();
@@ -120,11 +123,11 @@ public sealed partial class DeepIdV2AccountService
                 (parsed.SenderClientSequence < 3 || !Did2MessagingSessionScope.Fixed(parsed.ConversationId.Span, scope.Conversation)))
                 throw new CryptographicException("DID2 send event has a different owned endpoint.");
             source.RequireAccountOwner(this);
-            var pair = await source.VerifyForOwnMessagingAsync(this, scope, ct).ConfigureAwait(false);
+            var pair = await source.VerifyForOwnMessagingAsync(this, scope, ct, reintroduction?.Own).ConfigureAwait(false);
             using var verifier = OpenVerifier();
             return routeControl ?
                 await owner.SendRouteControlMessagingAsync(TrustedUnixSeconds(), verifier, scope, op, exact,
-                    pair.Own, pair.Peer, source, ct).ConfigureAwait(false) :
+                    pair.Own, pair.Peer, source, ct, reintroduction).ConfigureAwait(false) :
                 await owner.SendMessagingAsync(TrustedUnixSeconds(), verifier, scope, op, exact, pair.Own, pair.Peer, source, ct).ConfigureAwait(false);
         }
         finally

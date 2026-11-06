@@ -79,20 +79,23 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
     internal Task<OwnedDid2MessagingPersistedEvent> SendRouteControlMessagingAsync(ulong trustedUnixSeconds,
         IDeepMlDsa65Verifier verifier, Did2MessagingSessionScope scope, ReadOnlyMemory<byte> operation,
         ReadOnlyMemory<byte> exactDmc2, DeepIdV2ContactPathAuthoritySource.OwnPreKeyAuthoringAuthority own,
-        VerifiedDeepIdV2DirectoryFreshness peer, DeepIdV2ContactPathAuthoritySource source, CancellationToken ct) =>
-        RunMessagingAsync(trustedUnixSeconds, verifier, scope, operation, exactDmc2, true, own, peer, source, ct, routeControl: true);
+        VerifiedDeepIdV2DirectoryFreshness peer, DeepIdV2ContactPathAuthoritySource source, CancellationToken ct,
+        DeepIdV2ContactPathAuthoritySource.PermanentContactAuthority? reintroduction = null) =>
+        RunMessagingAsync(trustedUnixSeconds, verifier, scope, operation, exactDmc2, true, own, peer, source, ct,
+            routeControl: true, reintroduction: reintroduction);
 
     private async Task<OwnedDid2MessagingPersistedEvent> RunMessagingAsync(ulong trustedUnixSeconds,
         IDeepMlDsa65Verifier verifier, Did2MessagingSessionScope scope, ReadOnlyMemory<byte> operation,
         ReadOnlyMemory<byte> input, bool send, DeepIdV2ContactPathAuthoritySource.OwnPreKeyAuthoringAuthority own,
-        VerifiedDeepIdV2DirectoryFreshness peer, DeepIdV2ContactPathAuthoritySource source, CancellationToken ct, bool routeControl = false)
+        VerifiedDeepIdV2DirectoryFreshness peer, DeepIdV2ContactPathAuthoritySource source, CancellationToken ct, bool routeControl = false,
+        DeepIdV2ContactPathAuthoritySource.PermanentContactAuthority? reintroduction = null)
     {
         ClientDeliveryEvents.Initialize(); // EventSource creation/observer admission precedes private custody.
         var nativeWork = Did2MessagingSqlJournal.NativeWork.BeginOperation();
         try
         {
         var result = await RunMessagingUnderLeaseAsync(trustedUnixSeconds, verifier, scope, operation, input,
-            send, own, peer, source, ct, routeControl).ConfigureAwait(false);
+            send, own, peer, source, ct, routeControl, reintroduction).ConfigureAwait(false);
         // Final freshness passed and every private scope has been released.
         // No observer executes inside the guarded semantic transition.
         if (result.DeliveryObservation is { } observation) ClientDeliveryEvents.Publish(observation);
@@ -111,9 +114,12 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
     private async Task<OwnedDid2MessagingPersistedEvent> RunMessagingUnderLeaseAsync(ulong trustedUnixSeconds,
         IDeepMlDsa65Verifier verifier, Did2MessagingSessionScope scope, ReadOnlyMemory<byte> operation,
         ReadOnlyMemory<byte> input, bool send, DeepIdV2ContactPathAuthoritySource.OwnPreKeyAuthoringAuthority own,
-        VerifiedDeepIdV2DirectoryFreshness peer, DeepIdV2ContactPathAuthoritySource source, CancellationToken ct, bool routeControl = false)
+        VerifiedDeepIdV2DirectoryFreshness peer, DeepIdV2ContactPathAuthoritySource source, CancellationToken ct, bool routeControl = false,
+        DeepIdV2ContactPathAuthoritySource.PermanentContactAuthority? reintroduction = null)
     {
         ArgumentNullException.ThrowIfNull(scope);
+        if (reintroduction is not null && (!send || !routeControl))
+            throw new CryptographicException("Resolved re-introduction authority is restricted to owned route controls.");
         if (input.IsEmpty || input.Length > (send ? 33082 : 65536))
             throw new InvalidDataException("DID2 ordinary message exceeds its closed bound.");
         if (send) ProtectedDph2PreClaimJournal.RequireIntent(operation.Span);
@@ -126,6 +132,8 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             if (send)
             {
                 var parsed = senderEvent = ApplicationCoreCodec.DecodeDmc2(exact);
+                if (reintroduction is not null && parsed.ContentKind != Dmc2ContentKind.ContactRouteUpdate)
+                    throw new CryptographicException("Resolved re-introduction authority cannot admit an application payload.");
                 if (routeControl)
                 {
                     if (parsed.ContentKind != Dmc2ContentKind.ContactRouteUpdate)
@@ -209,7 +217,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 if (send && (senderEvent?.ContentKind is Dmc2ContentKind.MessageCreate or Dmc2ContentKind.AttachmentOffer or Dmc2ContentKind.ContactRouteUpdate ||
                     senderEvent is not null && ProtectedDid2GroupJournal.IsKind(senderEvent.ContentKind)))
                     await RequireNewMailboxWorkCapacityUnderLeaseAsync(current, held, opened, scope, op,
-                        own, peer, source, verifier, ct).ConfigureAwait(false);
+                        own, peer, source, verifier, ct, reintroduction).ConfigureAwait(false);
                 if (freshNative)
                 {
                     maintainedStorage = await PrepareNativeMaintenanceForTransitionAsync(current, scope, opened, floor,
@@ -227,7 +235,7 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 }, ct).ConfigureAwait(false);
                 using var state = transition.State; var context = transition.Context;
                 var authority = new AccountDpe2Authority(this, current, opened, held, floor, op, eventHash, send ? [] : exact,
-                    context.ReceiveReplayDisposition, senderEvent, own, peer, source);
+                    context.ReceiveReplayDisposition, senderEvent, own, peer, source, reintroduction);
                 if (send)
                 {
                     using var prepared = state.Use(bytes => ExactDpe2DurableTransactionProducer.PrepareSend(
@@ -313,6 +321,9 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 await MaterializeGroupNativeUnderLeaseAsync(current, held, scope, result, own, peer, source, ct).ConfigureAwait(false);
             if (newSend) result.DeliveryObservation = ClientDeliveryEvents.Capture(ClientDeliveryPhase.NativeOutboxDurable, stagedEvent);
             await RequireFinalMessagingFreshnessAsync(current, scope, own, peer, source, held, first, ct).ConfigureAwait(false);
+            if (reintroduction is not null)
+                _ = await RequireRouteReintroductionUnderLeaseAsync(current, held, opened, reintroduction,
+                    source, op, ct).ConfigureAwait(false);
             if (senderEvent?.ParsedPayload is AttachmentOfferDmc2Payload offered)
             {
                 var final = await RequireMessagingFreshnessAsync(current, own, peer, source, held, ct).ConfigureAwait(false);
@@ -353,7 +364,8 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
         Did2MessagingFloor floor, byte[] operation, byte[] sendEventHash, byte[] receivedEnvelope,
         ExactDpe2ReceiveReplayDisposition replay, ParsedDmc2? senderEvent,
         DeepIdV2ContactPathAuthoritySource.OwnPreKeyAuthoringAuthority own,
-        VerifiedDeepIdV2DirectoryFreshness peer, DeepIdV2ContactPathAuthoritySource source) : IExactDpe2DurableTransactionAuthority
+        VerifiedDeepIdV2DirectoryFreshness peer, DeepIdV2ContactPathAuthoritySource source,
+        DeepIdV2ContactPathAuthoritySource.PermanentContactAuthority? reintroduction) : IExactDpe2DurableTransactionAuthority
     {
         private int consumed;
         public async ValueTask<ExactDpe2DurableCommitReceipt> CommitAsync(ExactDpe2DurablePersistencePlan plan,
@@ -418,6 +430,13 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
                 if (send && applicationEvent.ContentKind == Dmc2ContentKind.ContactRouteUpdate)
                     await owner.RequireOwnRouteControlAdmissionUnderLeaseAsync(account, held, opened, operation,
                         applicationEvent.CanonicalBytes, own, peer, source, cancellationToken).ConfigureAwait(false);
+                if (reintroduction is not null)
+                {
+                    if (!send || applicationEvent.ContentKind != Dmc2ContentKind.ContactRouteUpdate)
+                        throw new CryptographicException("Resolved re-introduction authority cannot commit an application payload.");
+                    _ = await owner.RequireRouteReintroductionUnderLeaseAsync(account, held, opened, reintroduction,
+                        source, ReadOnlyMemory<byte>.Empty, cancellationToken).ConfigureAwait(false);
+                }
                 if (ProtectedDid2GroupJournal.IsKind(applicationEvent.ContentKind))
                     await owner.RequireGroupAdmissionUnderLeaseAsync(account, held, opened, opened.Scope, applicationEvent, send,
                         own, peer, source, cancellationToken).ConfigureAwait(false);

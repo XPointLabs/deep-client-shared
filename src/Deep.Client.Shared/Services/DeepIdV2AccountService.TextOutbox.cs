@@ -128,17 +128,18 @@ public sealed partial class DeepIdV2AccountService
     // No caller route, payload, expiry or sequence is accepted. The owner joins
     // actual adopted publication, native advertised history and the common floor.
     internal async Task<DirectTextOutboxEntry> PrepareOwnDirectRouteUpdateAsync(Did2MessagingSessionScope scope,
-        ReadOnlyMemory<byte> operation, DeepIdV2ContactPathAuthoritySource source, CancellationToken ct)
+        ReadOnlyMemory<byte> operation, DeepIdV2ContactPathAuthoritySource source, CancellationToken ct,
+        DeepIdV2ContactPathAuthoritySource.PermanentContactAuthority? reintroduction = null)
     {
         ArgumentNullException.ThrowIfNull(scope); ArgumentNullException.ThrowIfNull(source);
         source.RequireAccountOwner(this); ProtectedDph2PreClaimJournal.RequireIntent(operation.Span);
         var op = operation.ToArray();
         try
         {
-            var pair = await source.VerifyForOwnMessagingAsync(this, scope, ct).ConfigureAwait(false);
+            var pair = await source.VerifyForOwnMessagingAsync(this, scope, ct, reintroduction?.Own).ConfigureAwait(false);
             using var verifier = OpenVerifier();
             return await owner.PrepareDirectRouteUpdateAsync(TrustedUnixSeconds(), verifier, scope, op,
-                pair.Own, pair.Peer, source, ct).ConfigureAwait(false);
+                pair.Own, pair.Peer, source, ct, reintroduction).ConfigureAwait(false);
         }
         finally { CryptographicOperations.ZeroMemory(op); }
     }

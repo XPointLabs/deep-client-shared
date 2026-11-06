@@ -707,11 +707,19 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
     private async Task RequireNewMailboxWorkCapacityUnderLeaseAsync(VerifiedDeepIdV2CurrentAccount current,
         HeldDeepIdV2AccountLease held, OwnedDid2MessagingStorage opened, Did2MessagingSessionScope scope,
         ReadOnlyMemory<byte> operation, DeepIdV2ContactPathAuthoritySource.OwnPreKeyAuthoringAuthority own,
-        VerifiedDeepIdV2DirectoryFreshness peer, DeepIdV2ContactPathAuthoritySource source, IDeepMlDsa65Verifier verifier, CancellationToken ct)
+        VerifiedDeepIdV2DirectoryFreshness peer, DeepIdV2ContactPathAuthoritySource source, IDeepMlDsa65Verifier verifier, CancellationToken ct,
+        DeepIdV2ContactPathAuthoritySource.PermanentContactAuthority? reintroduction = null)
     {
         held.RequireActive(); ct.ThrowIfCancellationRequested();
         await RequireNoRetainedPeerRouteFaultUnderLeaseAsync(opened, held, ct).ConfigureAwait(false);
+        // A resolved route is usable only after the existing relationship,
+        // native consent/fault and independent current-source checks rejoin.
+        // It selects capacity metadata; it grants no Store or retirement.
+        var resolvedDestination = reintroduction is null ? null :
+            await RequireRouteReintroductionUnderLeaseAsync(current, held, opened, reintroduction,
+                source, ReadOnlyMemory<byte>.Empty, ct).ConfigureAwait(false);
         await MaintainMailboxNamespacesUnderLeaseAsync(current, held, verifier, own, source, ct).ConfigureAwait(false);
+        if (resolvedDestination is not null) await resolvedDestination.Route.EnsureCurrentAsync(ct).ConfigureAwait(false);
         using var sendRoot = await storage.ReadOwnedAsync(ProtectedDid2MailboxSendJournal.Slot, ct).ConfigureAwait(false) ??
             throw new InvalidDataException("Protected send custody is absent before new authored work.");
         using var sends = sendRoot.Use(bytes => ProtectedDid2MailboxSendJournal.Decode(bytes,
@@ -733,11 +741,13 @@ internal sealed partial class ProtectedDeepIdV2AccountOwner
             // Only when a bound is exhausted is a retained route/winner needed
             // to distinguish reusable custody from issuance of another scope.
             // Structural winner metadata is a capacity hint, never authority.
-            var route = await ReadAuthenticatedPeerMailboxRouteUnderLeaseAsync(current, opened, own, peer,
-                source, held, ct).ConfigureAwait(false);
-            var routeHash = SHA256.HashData(route.Route.ExactRouteClosure.Span);
+            var route = resolvedDestination is null ?
+                await ReadAuthenticatedPeerMailboxRouteUnderLeaseAsync(current, opened, own, peer, source, held, ct).ConfigureAwait(false) : null;
+            VerifiedDeepIdV2MailboxRouteClosure destinationRoute = resolvedDestination is null ? route!.Route : resolvedDestination.Route;
+            var routeHash = SHA256.HashData(destinationRoute.ExactRouteClosure.Span);
+            var locator = resolvedDestination?.Candidate.Request.LocatorHash ?? route!.LocatorHash;
             var grantScope = Convert.ToHexString(ProtectedDid2MailboxGrantJournal.Scope(routeHash,
-                route.LocatorHash.Span, (byte)MailboxCapabilityDomain.Deposit));
+                locator.Span, (byte)MailboxCapabilityDomain.Deposit));
             var candidate = ProtectedDid2MailboxGrantJournal.AcquisitionForNewWork(grants, grantScope);
             if (candidate is null && grants.Entries.Count >= ProtectedDid2MailboxGrantJournal.MaximumEntries)
                 throw new IOException("Protected mailbox acquisition capacity is exhausted before new authored work.");
